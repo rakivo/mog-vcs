@@ -13,9 +13,9 @@ pub fn write_tree(repo: &Repository, dir: &Path) -> Result<Hash> {
 fn write_tree_recursive(repo: &Repository, dir: &Path) -> Result<Hash> {
     let mut builder = TreeBuilder::new();
 
-    let mut entries: Vec<_> = fs::read_dir(dir)?
+    let mut entries = fs::read_dir(dir)?
         .filter_map(|e| e.ok())
-        .collect();
+        .collect::<Vec<_>>();
 
     entries.sort_by_key(|e| e.file_name());
 

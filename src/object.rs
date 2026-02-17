@@ -133,25 +133,6 @@ pub struct Tree {
     pub names_blob: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TreeWithPath {
-    path: String,
-    tree: Tree
-}
-
-impl Deref for TreeWithPath {
-    type Target = Tree;
-    fn deref(&self) -> &Self::Target {
-        &self.tree
-    }
-}
-
-impl DerefMut for TreeWithPath {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.tree
-    }
-}
-
 pub struct TreeIterator<'tree> {
     pub tree: &'tree Tree,
     pub index: usize
@@ -189,14 +170,24 @@ impl<'tree> IntoIterator for &'tree Tree {
     type IntoIter = TreeIterator<'tree>;
 
     fn into_iter(self) -> Self::IntoIter {
-        TreeIterator {
-            index: 0,
-            tree: self
-        }
+        TreeIterator { tree: self, index: 0 }
     }
 }
 
 impl Tree {
+    #[inline]
+    pub fn iter(&self) -> TreeIterator<'_> {
+        TreeIterator { tree: self, index: 0 }
+    }
+
+    // Find a named entry in a tree, returning its hash
+    #[inline]
+    pub fn find_in_tree<'a>(&'a self, name: &str) -> Option<&'a Hash> {
+        self.into_iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.hash)
+    }
+
     fn encode_into(&self, buf: &mut Vec<u8>) {
         // Entry count
         buf.extend_from_slice(&(self.count as u32).to_le_bytes());
@@ -267,6 +258,7 @@ impl Tree {
         })
     }
 
+    #[inline]
     pub fn get_name(&self, index: usize) -> &str {
         let start = self.name_offsets[index] as usize;
         let end = if index + 1 < self.count {

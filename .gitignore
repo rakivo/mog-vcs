@@ -1,4 +1,5 @@
 .vx
-test
 *.txt
-/target
+mog
+test
+target
