@@ -9,8 +9,83 @@ hex = "0.4"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 walkdir = "2.5"
+smallvec = "1.15.1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[profile.dev.package."*"]
+debug = 2
+
+[profile.dev]
+opt-level = 0
+debug = true
+split-debuginfo = "unpacked"
+lto = false
+overflow-checks = true
+codegen-units = 256
+incremental = true
 
 [profile.release]
-lto = true
-codegen-units = 1
 opt-level = 3
+panic = "abort"
+codegen-units = 1
+lto = false
+debug = true
+strip = false
+debug-assertions = true
+overflow-checks = true
+
+[profile.release-fast]
+inherits = "release"
+opt-level = 3
+panic = "abort"
+codegen-units = 1
+lto = "fat"
+debug = false
+strip = true
+debug-assertions = false
+overflow-checks = false
+
+[profile.debug-release]
+inherits = "release"
+debug = true
+codegen-units = 1
+overflow-checks = true    # integer overflow still checks
+debug-assertions = true   # `debug_assert!` still runs
+split-debuginfo = 'unpacked'
+lto = false
+strip = false
+
+# Want a small binary? Do this:
+# RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Zlocation-detail=none -Zfmt-debug=none" \
+#     cargo +nightly b \
+#         -Z build-std=std,panic_abort \
+#         -Z build-std-features= \
+#         --no-default-features --features=mimalloc,llvm \
+#         --profile=release-small --target=x86_64-unknown-linux-gnu
+[profile.release-small]
+inherits = "release"
+opt-level = "z"
+panic = "abort"
+codegen-units = 1
+lto = "fat"
+strip = true
+debug = false
+overflow-checks = false
+
+# also: set RUSTFLAGS="-C force-frame-pointers=yes"
+[profile.profiling]
+inherits = "release"
+debug = true                      # keep DWARF symbols
+split-debuginfo = "packed"        # so perf can find them easily (Linux)
+strip = "none"                    # don’t strip symbols
+lto = false
+codegen-units = 16
+overflow-checks = false
+panic = "abort"                   # optional: less noise, smaller code
+
+[profile.release-fast-bolt]
+inherits = "release-fast"
+lto = "fat"
+codegen-units = 1
+debug = true              # Keep debug info for BOLT
+strip = false             # Don't strip symbols

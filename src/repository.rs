@@ -1,9 +1,11 @@
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use anyhow::{Result, bail};
 use crate::object::{Commit, Object};
 use crate::storage::Storage;
 use crate::hash::{Hash, hash_to_hex, hex_to_hash};
+use crate::util::Xxh3HashSet;
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Result, bail};
 
 pub struct Repository {
     pub root: PathBuf,
@@ -15,17 +17,11 @@ impl Repository {
     pub fn init(path: &Path) -> Result<Self> {
         let vx_dir = path.join(".vx");
 
-        //
-        // Create directory structure
-        //
         std::fs::create_dir_all(&vx_dir)?;
         std::fs::create_dir_all(vx_dir.join("objects"))?;
         std::fs::create_dir_all(vx_dir.join("refs/heads"))?;
         std::fs::create_dir_all(vx_dir.join("refs/remotes"))?;
 
-        //
-        // Create HEAD
-        //
         std::fs::write(
             vx_dir.join("HEAD"),
             b"ref: refs/heads/main\n"
@@ -127,8 +123,8 @@ impl Repository {
     // Walk commit graph from `start`, collecting all reachable commit hashes.
     // Used for merge-safety check on delete.
     #[inline]
-    pub fn reachable_commits(&self, start: &Hash) -> HashSet<Hash> {
-        let mut visited = HashSet::new();
+    pub fn reachable_commits(&self, start: &Hash) -> Xxh3HashSet<Hash> {
+        let mut visited = Xxh3HashSet::default();
         let mut stack   = vec![*start];
 
         while let Some(hash) = stack.pop() {

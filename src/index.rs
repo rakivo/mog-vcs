@@ -47,11 +47,13 @@ pub struct Index {
 }
 
 pub struct IndexEntryRef<'a> {
-    pub mode:  u32,
+    // align 8
     pub hash:  &'a Hash,
     pub mtime: i64,
     pub size:  u64,
     pub path:  &'a str,
+
+    pub mode:  u32,
 }
 
 pub struct IndexIter<'index> {
@@ -277,15 +279,17 @@ impl Index {
             self.hashes[i] = hash;
             self.mtimes[i] = mtime;
             self.sizes[i]  = size;
-        } else {
-            self.modes.push(mode);
-            self.hashes.push(hash);
-            self.mtimes.push(mtime);
-            self.sizes.push(size);
-            self.path_offsets.push(self.paths_blob.len() as u32);
-            self.paths_blob.extend_from_slice(path_str.as_bytes());
-            self.count += 1;
+
+            return;
         }
+
+        self.modes.push(mode);
+        self.hashes.push(hash);
+        self.mtimes.push(mtime);
+        self.sizes.push(size);
+        self.path_offsets.push(self.paths_blob.len() as u32);
+        self.paths_blob.extend_from_slice(path_str.as_bytes());
+        self.count += 1;
     }
 
     // Remove an entry by path.
@@ -390,7 +394,6 @@ impl Index {
 
 // Builds a tree for `dir` by consuming a contiguous slice of sorted entries.
 // Returns (tree_hash, how_many_entries_consumed).
-// No HashMap, no String allocation, no cloning - just slices.
 fn build_tree_recursive(
     repo: &Repository,
     paths:  &[&str],

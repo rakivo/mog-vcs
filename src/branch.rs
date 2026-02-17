@@ -1,10 +1,9 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 use anyhow::{Result, bail};
 use crate::{
-    hash::{Hash, hash_to_hex, hex_to_hash},
+    hash::{hash_to_hex, hex_to_hash, Hash},
     object::Object,
-    repository::Repository,
+    repository::Repository, util::Xxh3HashSet,
 };
 
 #[inline]
@@ -106,7 +105,7 @@ pub fn delete(repo: &Repository, name: &str) -> Result<()> {
         .filter(|b| b != name)
         .filter_map(|b| repo.read_ref(&format!("refs/heads/{b}")).ok())
         .flat_map(|h| repo.reachable_commits(&h))
-        .collect::<HashSet<_>>();
+        .collect::<Xxh3HashSet<_>>();
 
     if !other_reachable.contains(&branch_hash) {
         bail!(

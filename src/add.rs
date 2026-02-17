@@ -24,7 +24,9 @@ pub fn add(repo: &Repository, paths: &[PathBuf]) -> Result<()> {
             Cow::Owned(current_dir.join(path))
         };
 
+        //
         // Canonicalize to resolve "." and ".."
+        //
         let full = full.canonicalize()?;
 
         if full.is_file() {
@@ -60,18 +62,30 @@ pub fn add(repo: &Repository, paths: &[PathBuf]) -> Result<()> {
 }
 
 fn add_file(repo: &Repository, index: &mut Index, abs_path: &Path) -> Result<()> {
-    let data     = fs::read(abs_path)?;
-    let metadata = fs::metadata(abs_path)?;
-
-    // Write blob to object store
-    let hash = repo.storage.write(&Object::Blob(Blob { data }))?;
-
-    // Store relative path (unix separators even on windows for portability)
     let rel = abs_path.strip_prefix(&repo.root)?;
     let rel_str = rel.to_str().expect("non-utf8 path");
-
+    //
     // Normalise to forward slashes
+    //
     let rel_normalized = PathBuf::from(rel_str.replace('\\', "/"));
+
+    let metadata = fs::metadata(abs_path)?;
+
+    // Fast path: if mtime + size match, skip hashing and blob write entirely
+    if let Some(i) = index.find(&rel_normalized) {
+        if !index.is_dirty(i, &metadata) {
+            return Ok(());
+        }
+    }
+
+    let data     = fs::read(abs_path)?;
+
+    //
+    // Write blob to object store
+    //
+    let hash = repo.storage.write(&Object::Blob(Blob {
+        data: crate::util::vec_into_boxed_slice_noshrink(data)
+    }))?;
 
     index.add(&rel_normalized, hash, &metadata);
     Ok(())

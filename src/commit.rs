@@ -1,4 +1,5 @@
 use anyhow::Result;
+use smallvec::smallvec;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::fs;
 use crate::repository::Repository;
@@ -17,17 +18,17 @@ pub fn commit(
         .as_secs() as i64;
 
     let parents = if let Some(p) = parent {
-        vec![p]
+        smallvec![p]
     } else {
-        vec![]
+        smallvec![]
     };
 
     let commit = Commit {
         tree,
         parents,
         timestamp,
-        author: author.to_string(),
-        message: message.to_string(),
+        author: author.into(),
+        message: message.into(),
     };
 
     let hash = repo.storage.write(&Object::Commit(commit))?;

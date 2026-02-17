@@ -1,13 +1,18 @@
+use crate::hash::Hash;
+
 use std::ops::{Deref, DerefMut};
 
 use anyhow::{Result, bail};
-use crate::hash::Hash;
+use smallvec::SmallVec;
 
-// File mode constants
 pub const MODE_FILE: u32 = 0o100644;
 pub const MODE_EXEC: u32 = 0o100755;
-pub const MODE_DIR: u32 = 0o040000;
+pub const MODE_DIR:  u32 = 0o040000;
 pub const MODE_LINK: u32 = 0o120000;
+
+pub const OBJECT_BLOB:   u8 = 0x1;
+pub const OBJECT_TREE:   u8 = 0x2;
+pub const OBJECT_COMMIT: u8 = 0x4;
 
 #[derive(Debug, Clone)]
 pub enum Object {
@@ -65,22 +70,23 @@ impl Object {
         }
     }
 
+    #[inline]
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"VX01");
 
         match self {
             Object::Blob(blob) => {
-                buf.push(0);
+                buf.push(OBJECT_BLOB);
                 buf.extend_from_slice(&(blob.data.len() as u64).to_le_bytes());
                 buf.extend_from_slice(&blob.data);
             }
             Object::Tree(tree) => {
-                buf.push(1);
+                buf.push(OBJECT_TREE);
                 tree.encode_into(&mut buf);
             }
             Object::Commit(commit) => {
-                buf.push(2);
+                buf.push(OBJECT_COMMIT);
                 commit.encode_into(&mut buf);
             }
         }
@@ -88,6 +94,7 @@ impl Object {
         buf
     }
 
+    #[inline]
     pub fn decode(data: &[u8]) -> Result<Self> {
         if data.len() < 5 {
             bail!("data too short");
@@ -105,6 +112,7 @@ impl Object {
         }
     }
 
+    #[inline]
     pub fn hash(&self) -> Hash {
         let encoded = self.encode();
         blake3::hash(&encoded).into()
@@ -113,24 +121,24 @@ impl Object {
 
 #[derive(Debug, Clone)]
 pub struct Blob {
-    pub data: Vec<u8>,
+    pub data: Box<[u8]>,
 }
 
 impl Blob {
+    #[inline]
     fn decode(data: &[u8]) -> Result<Self> {
         let len = u64::from_le_bytes(data[0..8].try_into()?) as usize;
-        let data = data[8..8+len].to_vec();
+        let data = crate::util::vec_into_boxed_slice_noshrink(data[8..8+len].to_vec());
         Ok(Blob { data })
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Tree {
-    pub count: usize,
-    pub modes: Vec<u32>,
-    pub hashes: Vec<Hash>,
-    pub name_offsets: Vec<u32>,
-    pub names_blob: Vec<u8>,
+    pub modes:        Box<[u32]>,
+    pub hashes:       Box<[Hash]>,
+    pub name_offsets: Box<[u32]>,
+    pub names_blob:   Box<[u8]>,
 }
 
 pub struct TreeIterator<'tree> {
@@ -140,16 +148,18 @@ pub struct TreeIterator<'tree> {
 
 #[derive(Debug)]
 pub struct TreeEntryRef<'tree> {
-    pub mode: u32,
+    // align 8
     pub hash: &'tree Hash,
-    pub name: &'tree str
+    pub name: &'tree str,
+
+    pub mode: u32,
 }
 
 impl<'tree> Iterator for TreeIterator<'tree> {
     type Item = TreeEntryRef<'tree>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.tree.count {
+        if self.index >= self.tree.count() {
             return None;
         }
 
@@ -180,6 +190,11 @@ impl Tree {
         TreeIterator { tree: self, index: 0 }
     }
 
+    #[inline]
+    pub fn count(&self) -> usize {
+        self.modes.len()
+    }
+
     // Find a named entry in a tree, returning its hash
     #[inline]
     pub fn find_in_tree<'a>(&'a self, name: &str) -> Option<&'a Hash> {
@@ -190,7 +205,7 @@ impl Tree {
 
     fn encode_into(&self, buf: &mut Vec<u8>) {
         // Entry count
-        buf.extend_from_slice(&(self.count as u32).to_le_bytes());
+        buf.extend_from_slice(&(self.count() as u32).to_le_bytes());
 
         // Modes (SoA)
         for mode in &self.modes {
@@ -250,18 +265,17 @@ impl Tree {
         let names_blob = data[cursor..cursor+names_len].to_vec();
 
         Ok(Tree {
-            count,
-            modes,
-            hashes,
-            name_offsets,
-            names_blob,
+            modes: crate::util::vec_into_boxed_slice_noshrink(modes),
+            hashes: crate::util::vec_into_boxed_slice_noshrink(hashes),
+            name_offsets: crate::util::vec_into_boxed_slice_noshrink(name_offsets),
+            names_blob: crate::util::vec_into_boxed_slice_noshrink(names_blob),
         })
     }
 
     #[inline]
     pub fn get_name(&self, index: usize) -> &str {
         let start = self.name_offsets[index] as usize;
-        let end = if index + 1 < self.count {
+        let end = if index + 1 < self.count() {
             self.name_offsets[index + 1] as usize
         } else {
             self.names_blob.len()
@@ -274,11 +288,13 @@ impl Tree {
 
 #[derive(Debug, Clone)]
 pub struct Commit {
-    pub tree: Hash,
-    pub parents: Vec<Hash>,
+    // align 8
+    pub parents: SmallVec<[Hash; 1]>, // Usually only one parent!
     pub timestamp: i64,
-    pub author: String,
-    pub message: String,
+    pub author: Box<str>,
+    pub message: Box<str>,
+
+    pub tree: Hash,
 }
 
 impl Commit {
@@ -316,7 +332,7 @@ impl Commit {
         let parent_count = u32::from_le_bytes(data[cursor..cursor+4].try_into()?) as usize;
         cursor += 4;
 
-        let mut parents = Vec::with_capacity(parent_count);
+        let mut parents = SmallVec::with_capacity(parent_count);
         for _ in 0..parent_count {
             let mut parent = [0u8; 32];
             parent.copy_from_slice(&data[cursor..cursor+32]);
@@ -331,13 +347,13 @@ impl Commit {
         // Author
         let author_len = u32::from_le_bytes(data[cursor..cursor+4].try_into()?) as usize;
         cursor += 4;
-        let author = String::from_utf8(data[cursor..cursor+author_len].to_vec())?;
+        let author = String::from_utf8(data[cursor..cursor+author_len].to_vec())?.into_boxed_str();
         cursor += author_len;
 
         // Message
         let msg_len = u32::from_le_bytes(data[cursor..cursor+4].try_into()?) as usize;
         cursor += 4;
-        let message = String::from_utf8(data[cursor..cursor+msg_len].to_vec())?;
+        let message = String::from_utf8(data[cursor..cursor+msg_len].to_vec())?.into_boxed_str();
 
         Ok(Commit {
             tree,

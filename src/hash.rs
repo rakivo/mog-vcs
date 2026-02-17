@@ -12,6 +12,5 @@ pub fn hash_to_hex(hash: &Hash) -> String {
 
 pub fn hex_to_hash(s: &str) -> Result<Hash> {
     let bytes = hex::decode(s)?;
-    bytes.try_into()
-        .map_err(|_| anyhow::anyhow!("invalid hash length"))
+    bytes.try_into().map_err(|_| anyhow::anyhow!("invalid hash length"))
 }

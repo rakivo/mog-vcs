@@ -37,7 +37,7 @@ fn write_tree_recursive(repo: &Repository, dir: &Path) -> Result<Hash> {
         } else {
             // Write blob
             let data = fs::read(&path)?;
-            let blob = Blob { data };
+            let blob = Blob { data: crate::util::vec_into_boxed_slice_noshrink(data) };
             let hash = repo.storage.write(&Object::Blob(blob))?;
 
             let mode = if is_executable(&metadata) {

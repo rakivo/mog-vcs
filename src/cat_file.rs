@@ -12,7 +12,7 @@ pub fn cat_file(repo: &Repository, hash_str: &str) -> Result<()> {
             println!("{}", String::from_utf8_lossy(&blob.data));
         }
         Object::Tree(tree) => {
-            for i in 0..tree.count {
+            for i in 0..tree.count() {
                 println!(
                     "0o{:06o} {} {}",
                     tree.modes[i],

@@ -1,9 +1,5 @@
 #![allow(unused, dead_code)]
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
-use std::path::PathBuf;
-
 mod hash;
 mod object;
 mod tree_builder;
@@ -18,8 +14,14 @@ mod checkout;
 mod add;
 mod index;
 mod branch;
+mod util;
 
 use repository::Repository;
+
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+use anyhow::Result;
 
 #[derive(Parser)]
 #[command(name = "vx")]
