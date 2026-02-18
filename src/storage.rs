@@ -1,54 +1,352 @@
-use crate::hash::{Hash, hash_to_hex};
-use crate::object::Object;
+// src/storage.rs
+use crate::hash::Hash;
+use crate::tracy;
+use anyhow::{Result, bail};
+use std::path::Path;
+use std::fs::{File, OpenOptions};
+use memmap2::{MmapMut, MmapOptions};
+use libc::{madvise, MADV_DONTNEED, MADV_SEQUENTIAL, MADV_WILLNEED};
 
-use std::path::{Path, PathBuf};
-use std::fs;
+const MAGIC: &[u8; 4] = b"VXOB";
+const VERSION: u32 = 1;
 
-use anyhow::Result;
+const HEADER_SIZE: usize = 128;
+const HASH_TABLE_BUCKETS: usize = 1 << 21;  // 2M buckets
+const HASH_TABLE_SIZE: usize = HASH_TABLE_BUCKETS * 8;  // 16MB
+const DATA_START: u64 = (HEADER_SIZE + HASH_TABLE_SIZE) as u64;
+
+const ENTRY_HEADER_SIZE: usize = 36; // hash(32) + size(4)
+
+pub struct PendingStorageWrite {
+    pub hash: Hash,
+    pub data: Vec<u8>,
+}
 
 pub struct Storage {
-    root: PathBuf,
+    file: File,
+    mmap: MmapMut,
+    /// Cached file length so `write_batch` doesn't call `metadata()` every chunk.
+    file_len: u64,
+    /// Encoded bytes only. No Object clone.
+    pending_writes: Vec<PendingStorageWrite>,
+}
+
+impl Drop for Storage {
+    fn drop(&mut self) {
+        // Best-effort: flush any pending writes and sync.
+        // Ignore errors here; they will have been reported at call sites.
+        let _ = self.flush();
+    }
 }
 
 impl Storage {
-    #[inline]
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
+    pub fn new(root: &Path) -> Result<Self> {
+        let path = root.join("objects.bin");
+
+        if path.exists() {
+            Self::open_existing(&path)
+        } else {
+            Self::create_new(&path)
+        }
     }
 
-    #[inline]
-    fn object_path(&self, hash: &Hash) -> PathBuf {
-        let hex = hash_to_hex(hash);
-        self.root
-            .join("objects")
-            .join(&hex[..2])
-            .join(&hex[2..])
-    }
+    fn create_new(path: &Path) -> Result<Self> {
+        let _span = tracy::span!("Storage::create_new");
 
-    #[inline]
-    pub fn write(&self, obj: &Object) -> Result<Hash> {
-        let hash = obj.hash();
-        let path = self.object_path(&hash);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        // Pre-allocate header + hash table
+        let initial_size = HEADER_SIZE + HASH_TABLE_SIZE;
+        file.set_len(initial_size as u64)?;
+
+        let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
+
+        unsafe {
+            madvise(
+                mmap.as_ptr() as *mut libc::c_void,
+                mmap.len(),
+                MADV_SEQUENTIAL | MADV_WILLNEED
+            );
         }
 
-        let encoded = obj.encode();
-        fs::write(path, encoded)?;
+        // Write header directly into mmap
+        mmap[0..4].copy_from_slice(MAGIC);
+        mmap[4..8].copy_from_slice(&VERSION.to_le_bytes());
+        mmap[8..16].copy_from_slice(&0u64.to_le_bytes());  // count
+        mmap[16..24].copy_from_slice(&DATA_START.to_le_bytes());
 
-        Ok(hash)
+        mmap.flush()?;
+
+        Ok(Self { file, mmap, file_len: initial_size as u64, pending_writes: Vec::new() })
+    }
+
+    fn open_existing(path: &Path) -> Result<Self> {
+        let _span = tracy::span!("Storage::open_existing");
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+
+        let mmap = unsafe { MmapOptions::new().map_mut(&file)? };
+
+        unsafe {
+            madvise(
+                mmap.as_ptr() as *mut libc::c_void,
+                mmap.len(),
+                MADV_SEQUENTIAL | MADV_WILLNEED
+            );
+        }
+
+        if mmap.len() < HEADER_SIZE {
+            bail!("corrupted object database");
+        }
+
+        if &mmap[0..4] != MAGIC {
+            bail!("invalid object database magic");
+        }
+
+        let file_len = file.metadata()?.len();
+
+        // Don't keep object data resident when repo is huge (e.g. add only touches hash table).
+        let data_start = DATA_START as usize;
+        let data_len = mmap.len().saturating_sub(data_start);
+        if data_len > 0 {
+            unsafe {
+                let data_ptr = mmap.as_ptr().add(data_start) as *mut libc::c_void;
+                madvise(data_ptr, data_len, MADV_DONTNEED);
+            }
+        }
+
+        Ok(Self { file, mmap, file_len, pending_writes: Vec::new() })
     }
 
     #[inline]
-    pub fn read(&self, hash: &Hash) -> Result<Object> {
-        let path = self.object_path(hash);
-        let data = fs::read(path)?;
-        Object::decode(&data)
+    fn hash_to_bucket(hash: &Hash) -> usize {
+        let _span = tracy::span!("Storage::hash_to_bucket");
+
+        let h = u64::from_le_bytes(hash[..8].try_into().unwrap());
+        (h as usize) % HASH_TABLE_BUCKETS
+    }
+
+    #[inline]
+    fn get_bucket_offset(&self, bucket: usize) -> u64 {
+        let _span = tracy::span!("Storage::get_bucket_offset");
+
+        let offset = HEADER_SIZE + bucket * 8;
+        u64::from_le_bytes(self.mmap[offset..offset + 8].try_into().unwrap())
+    }
+
+    #[inline]
+    fn set_bucket_offset(&mut self, bucket: usize, value: u64) {
+        let _span = tracy::span!("Storage::set_bucket_offset");
+
+        let offset = HEADER_SIZE + bucket * 8;
+        self.mmap[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
 
     #[inline]
     pub fn exists(&self, hash: &Hash) -> bool {
-        self.object_path(hash).exists()
+        let _span = tracy::span!("Storage::exists");
+
+        let bucket = Self::hash_to_bucket(hash);
+        let mut current_bucket = bucket;
+
+        loop {
+            let offset = self.get_bucket_offset(current_bucket);
+
+            if offset == 0 {
+                return false;
+            }
+
+            let pos = offset as usize;
+            if pos + 32 > self.mmap.len() {
+                return false;
+            }
+
+            if self.mmap[pos..pos + 32] == hash[..] {
+                return true;
+            }
+
+            current_bucket = (current_bucket + 1) % HASH_TABLE_BUCKETS;
+            if current_bucket == bucket {
+                return false;
+            }
+        }
+    }
+
+    /// Read encoded object bytes by hash.
+    pub fn read(&self, hash: &Hash) -> Result<Vec<u8>> {
+        let _span = tracy::span!("Storage::read");
+
+        let bucket = Self::hash_to_bucket(hash);
+        let mut current_bucket = bucket;
+
+        loop {
+            let offset = self.get_bucket_offset(current_bucket);
+
+            if offset == 0 {
+                bail!("object not found");
+            }
+
+            let pos = offset as usize;
+
+            if self.mmap[pos..pos + 32] == hash[..] {
+                let size = u32::from_le_bytes(
+                    self.mmap[pos + 32..pos + 36].try_into()?
+                ) as usize;
+
+                let data = &self.mmap[pos + 36..pos + 36 + size];
+                let mut out = Vec::with_capacity(size);
+                out.extend_from_slice(data);
+                return Ok(out);
+            }
+
+            current_bucket = (current_bucket + 1) % HASH_TABLE_BUCKETS;
+            if current_bucket == bucket {
+                bail!("object not found");
+            }
+        }
+    }
+
+    /// Push encoded bytes; caller hashes. Used by `write_object`.
+    pub fn write(&mut self, hash: Hash, data: Vec<u8>) {
+        if self.exists(&hash) {
+            return;
+        }
+
+        self.pending_writes.push(PendingStorageWrite { hash, data });
+    }
+
+    /// Write encoded objects from caller buffers. One buffer, one `write_at`.
+    pub fn write_batch<'a>(&mut self, entries: impl Iterator<Item = (Hash, &'a [u8])>) -> Result<()> {
+        let _span = tracy::span!("Storage::write_batch");
+
+        let to_write: Vec<(Hash, &[u8])> = entries
+            .filter(|(hash, _)| !self.exists(hash))
+            .collect();
+
+        if to_write.is_empty() {
+            return Ok(());
+        }
+
+        let total_size: usize = to_write.iter()
+            .map(|(_, e)| ENTRY_HEADER_SIZE + e.len())
+            .sum();
+
+        let current_size = self.file_len;
+        self.file_len = current_size + total_size as u64;
+        self.file.set_len(self.file_len)?;
+
+        let mut buf = Vec::with_capacity(total_size);
+        for (hash, encoded) in &to_write {
+            buf.extend_from_slice(hash);
+            buf.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            buf.extend_from_slice(encoded);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self.file.write_at(&buf, current_size)?;
+        }
+        #[cfg(not(unix))]
+        {
+            self.file.seek(SeekFrom::Start(current_size))?;
+            self.file.write_all(&buf)?;
+        }
+
+        let mut offset = current_size;
+        for (hash, encoded) in &to_write {
+            let bucket = Self::hash_to_bucket(hash);
+            let mut current_bucket = bucket;
+            loop {
+                if self.get_bucket_offset(current_bucket) == 0 {
+                    self.set_bucket_offset(current_bucket, offset);
+                    break;
+                }
+                current_bucket = (current_bucket + 1) % HASH_TABLE_BUCKETS;
+                if current_bucket == bucket {
+                    bail!("hash table full");
+                }
+            }
+            offset += (ENTRY_HEADER_SIZE + encoded.len()) as u64;
+        }
+
+        let count = u64::from_le_bytes(self.mmap[8..16].try_into()?);
+        self.mmap[8..16].copy_from_slice(&(count + to_write.len() as u64).to_le_bytes());
+        Ok(())
+    }
+
+    /// Flush mmap and fsync. Call once after many `write_batch` calls (e.g. at end of add).
+    pub fn sync(&mut self) -> Result<()> {
+        self.mmap.flush()?;
+        self.file.sync_all()?;
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<()> {
+        let _span = tracy::span!("Storage::flush");
+
+        if self.pending_writes.is_empty() {
+            return Ok(());
+        }
+
+        let writes = std::mem::take(&mut self.pending_writes);
+        let total_size: usize = writes.iter()
+            .map(|PendingStorageWrite { data, .. }| ENTRY_HEADER_SIZE + data.len())
+            .sum();
+
+        let current_size = self.file_len;
+        self.file_len = current_size + total_size as u64;
+        self.file.set_len(self.file_len)?;
+
+        let mut buf = Vec::with_capacity(total_size);
+
+        for PendingStorageWrite { hash, data: encoded } in &writes {
+            buf.extend_from_slice(hash);
+            buf.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            buf.extend_from_slice(encoded);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self.file.write_at(&buf, current_size)?;
+        }
+        #[cfg(not(unix))]
+        {
+            self.file.seek(SeekFrom::Start(current_size))?;
+            self.file.write_all(&buf)?;
+        }
+
+        let mut off = current_size;
+        for PendingStorageWrite { hash, data: encoded } in &writes {
+            let bucket = Self::hash_to_bucket(hash);
+            let mut current_bucket = bucket;
+            loop {
+                if self.get_bucket_offset(current_bucket) == 0 {
+                    self.set_bucket_offset(current_bucket, off);
+                    break;
+                }
+                current_bucket = (current_bucket + 1) % HASH_TABLE_BUCKETS;
+                if current_bucket == bucket {
+                    bail!("hash table full");
+                }
+            }
+            off += (ENTRY_HEADER_SIZE + encoded.len()) as u64;
+        }
+
+        let count = u64::from_le_bytes(self.mmap[8..16].try_into()?);
+        self.mmap[8..16].copy_from_slice(&(count + writes.len() as u64).to_le_bytes());
+
+        self.sync()?;
+
+        Ok(())
     }
 }

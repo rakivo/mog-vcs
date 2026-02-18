@@ -1,96 +1,89 @@
-#![allow(unused_imports)]
-
-use std::{borrow::Cow, path::Path};
-
-use crate::{hash::{hash_to_hex, hex_to_hash}, index::Index, object::{Blob, Commit, Object, Tree}, repository::Repository};
+use crate::hash::{hash_to_hex, hex_to_hash};
+use crate::index::Index;
+use crate::repository::Repository;
+use crate::object::Object;
+use crate::store::{BlobId, CommitId, TreeId};
+use crate::tree::TreeEntry;
 
 use anyhow::Result;
 
 #[inline]
-pub fn checkout_blob_to(repo: &Repository, blob: &Blob, to: &str) -> Result<()> {
+pub fn checkout_blob_to(repo: &Repository, blob_id: BlobId, to: &str) -> Result<()> {
     let path = repo.root.join(to);
-
-    // Create parent directories if they don't exist
-    // e.g. "src/foo/bar.rs" needs "src/foo/" to exist first
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-
-    _ = std::fs::write(&path, &blob.data);
-
+    let data = repo.blob_store.get(blob_id);
+    std::fs::write(&path, data)?;
     Ok(())
 }
 
 #[inline]
-pub fn checkout_commit(repo: &Repository, commit: &Commit) -> Result<()> {
-    let object = repo.storage.read(&commit.tree)?;
-    let tree = object.try_as_tree()?;
-    checkout_tree(repo, &tree)
+pub fn checkout_commit(repo: &mut Repository, commit_id: CommitId) -> Result<()> {
+    let tree_hash = repo.commit_store.get_tree(commit_id);
+    let obj = repo.read_object(&tree_hash)?;
+    let tree_id = obj.try_as_tree_id()?;
+    checkout_tree(repo, tree_id)
 }
 
 #[inline]
-pub fn checkout_tree(repo: &Repository, tree: &Tree) -> Result<()> {
-    checkout_tree_impl(repo, tree, None)
+pub fn checkout_tree(repo: &mut Repository, tree_id: TreeId) -> Result<()> {
+    checkout_tree_impl(repo, tree_id, None)
 }
 
-pub fn checkout_tree_impl(repo: &Repository, tree: &Tree, tree_path: Option<&str>) -> Result<()> {
-    for entry in tree {
-        let object = repo.storage.read(entry.hash)?;
+pub fn checkout_tree_impl(
+    repo: &mut Repository,
+    tree_id: TreeId,
+    tree_path: Option<&str>,
+) -> Result<()> {
+    let n = repo.tree_store.entry_count(tree_id);
+    for j in 0..n {
+        let TreeEntry { hash, name, .. } = repo.tree_store.get_entry(tree_id, j);
+        let obj = repo.read_object(&hash)?;
 
-        let to = entry.name;
-        let full_path = if let Some(tree_path) = tree_path {
-            Cow::Owned(format!("{tree_path}/{to}"))
+        let full_path = if let Some(tp) = tree_path {
+            format!("{tp}/{name}").into()
         } else {
-            Cow::Borrowed(to)
+            name
         };
 
-        match object {
-            Object::Blob(blob) => checkout_blob_to(repo, &blob, &full_path)?,
-            Object::Tree(tree) => checkout_tree_impl(repo, &tree, Some(&full_path))?,
-            Object::Commit(_) => {} // submodule, ignore for now
+        match obj {
+            Object::Blob(blob_id) => checkout_blob_to(repo, blob_id, &full_path)?,
+            Object::Tree(sub_id) => checkout_tree_impl(repo, sub_id, Some(&full_path))?,
+            Object::Commit(_) => {}
         }
     }
-
     Ok(())
 }
 
-pub fn checkout(repo: &Repository, branch: &str) -> Result<()> {
+pub fn checkout(repo: &mut Repository, branch: &str) -> Result<()> {
     let branch_ref = format!("refs/heads/{branch}");
     let branch_path = repo.root.join(".vx").join(&branch_ref);
 
     if branch_path.exists() {
-        //
-        // It's a branch - normal checkout
-        //
-
         let hash = repo.read_ref(&branch_ref)?;
-        let commit = repo.storage.read(&hash)?.try_into_commit()?;
-        let tree = repo.storage.read(&commit.tree)?.try_into_tree()?;
+        let obj = repo.read_object(&hash)?;
+        let commit_id = obj.try_as_commit_id()?;
 
         std::fs::write(
             repo.root.join(".vx/HEAD"),
-            format!("ref: {branch_ref}\n")
+            format!("ref: {branch_ref}\n"),
         )?;
 
         println!("Switched to branch '{branch}'");
-
-        return checkout_tree(repo, &tree);
+        return checkout_commit(repo, commit_id);
     }
 
-    //
-    // Try as commit hash - detached HEAD
-    //
     let hash = hex_to_hash(branch)?;
-    let object = repo.storage.read(&hash)?;
-    checkout_commit(repo, object.try_as_commit()?)?;
+    let obj = repo.read_object(&hash)?;
+    checkout_commit(repo, obj.try_as_commit_id()?)?;
 
-    // HEAD points directly to commit
     std::fs::write(
         repo.root.join(".vx/HEAD"),
-        format!("{branch}\n")
+        format!("{hash}\n", hash = hash_to_hex(&hash)),
     )?;
 
-    println!("HEAD is now at {} (detached)", &branch[..8]);
+    println!("HEAD is now at {} (detached)", &hash_to_hex(&hash)[..8]);
     println!("You are in detached HEAD state.");
     println!("If you commit, create a branch to keep your work:");
     println!("  vx branch save-my-work");
@@ -98,44 +91,28 @@ pub fn checkout(repo: &Repository, branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// Checkout a specific file or directory from a commit/branch,
-/// then update the index to reflect the restored state.
-pub fn checkout_path(repo: &Repository, target: &str, path: &str) -> Result<()> {
-    let commit = repo.resolve_to_commit(target)?;
-    let (obj, obj_hash) = repo.walk_tree_path(&commit.tree, path)?;
+pub fn checkout_path(repo: &mut Repository, target: &str, path: &str) -> Result<()> {
+    let (_commit_hash, commit_id) = repo.resolve_to_commit(target)?;
+    let tree_hash = repo.commit_store.get_tree(commit_id);
+    let (obj, obj_hash) = repo.walk_tree_path(&tree_hash, path)?;
 
     let mut index = Index::load(&repo.root)?;
 
     match obj {
-        Object::Blob(ref blob) => {
-            checkout_blob_to(repo, blob, path)?;
-
-            //
-            // Update index entry
-            //
+        Object::Blob(blob_id) => {
+            checkout_blob_to(repo, blob_id, path)?;
             let abs = repo.root.join(path);
             let metadata = std::fs::metadata(&abs)?;
             index.add(path.as_ref(), obj_hash, &metadata);
             index.save(&repo.root)?;
-
             println!("restored '{path}'");
         }
-
-        Object::Tree(ref tree) => {
-            //
-            // Write all files under the directory
-            //
-            checkout_tree_impl(repo, tree, Some(path))?;
-
-            //
-            // Update index for every file we just wrote
-            //
-            index.update_from_tree_recursive(repo, tree, path)?;
+        Object::Tree(tree_id) => {
+            checkout_tree_impl(repo, tree_id, Some(path))?;
+            index.update_from_tree_recursive(repo, tree_id, path)?;
             index.save(&repo.root)?;
-
             println!("restored '{path}/'");
         }
-
         Object::Commit(_) => anyhow::bail!("unexpected commit object at '{path}'"),
     }
 

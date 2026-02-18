@@ -1,8 +1,41 @@
-#![allow(unused, dead_code)]
+#![warn(clippy::all, clippy::pedantic, clippy::cargo, dead_code)]
+#![allow(
+    clippy::inline_always,
+    clippy::uninlined_format_args, // ?...
+    clippy::borrow_as_ptr,
+    clippy::collapsible_if,
+    clippy::new_without_default,
+    clippy::redundant_field_names,
+    clippy::struct_field_names,
+    clippy::ptr_as_ptr,
+    clippy::missing_transmute_annotations,
+    clippy::multiple_crate_versions,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::similar_names,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::used_underscore_binding,
+    clippy::nonstandard_macro_braces,
+    clippy::used_underscore_items,
+    clippy::enum_glob_use,
+    clippy::cast_lossless,
+    clippy::match_same_arms,
+    clippy::too_many_lines,
+    clippy::unnested_or_patterns,
+    clippy::blocks_in_conditions,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+)]
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod hash;
 mod object;
-mod tree_builder;
+mod store;
+mod wire;
 mod storage;
 mod repository;
 mod hash_object;
@@ -14,7 +47,13 @@ mod checkout;
 mod add;
 mod index;
 mod branch;
+mod cache;
+mod ignore;
+mod status;
+mod remove;
 mod util;
+mod tracy;
+mod tree;
 
 use repository::Repository;
 
@@ -47,6 +86,10 @@ enum Commands {
     WriteTree,
     Log,
     Add {
+        files: Vec<PathBuf>,
+    },
+    /// Remove paths from the index (unstage)
+    Remove {
         files: Vec<PathBuf>,
     },
     Checkout {
@@ -86,10 +129,14 @@ enum Commands {
         #[arg(short = 'm', long = "rename", num_args = 2, conflicts_with_all = ["delete", "force_delete"])]
         rename_to: Vec<String>,
     },
+    /// Show working tree status (staged, modified, deleted, untracked)
+    Status,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    tracy_client::Client::start();
 
     match cli.command {
         Commands::Init { path } => {
@@ -99,75 +146,82 @@ fn main() -> Result<()> {
         }
 
         Commands::HashObject { write, file } => {
-            let repo = Repository::open(&PathBuf::from("."))?;
-            hash_object::hash_object(&repo, &file, write)?;
+            let mut repo = Repository::open(&PathBuf::from("."))?;
+            hash_object::hash_object(&mut repo, &file, write)?;
         }
 
         Commands::CatFile { hash } => {
-            let repo = Repository::open(&PathBuf::from("."))?;
-            cat_file::cat_file(&repo, &hash)?;
+            let mut repo = Repository::open(&PathBuf::from("."))?;
+            cat_file::cat_file(&mut repo, &hash)?;
         }
 
         Commands::WriteTree => {
-            let repo = Repository::open(&PathBuf::from("."))?;
-            let hash = write_tree::write_tree(&repo, &PathBuf::from("."))?;
+            let mut repo = Repository::open(&PathBuf::from("."))?;
+            let hash = write_tree::write_tree(&mut repo, &PathBuf::from("."))?;
             println!("{}", hash::hash_to_hex(&hash));
         }
 
         Commands::Log => {
-            let repo = Repository::open(&PathBuf::from("."))?;
+            let mut repo = Repository::open(&PathBuf::from("."))?;
             let mut buf = String::new();
-            log::log(&repo, &mut buf)?;
-            println!("{buf}");
+            log::log(&mut repo, &mut buf)?;
+            print!("{buf}");
         }
 
         Commands::Checkout { branch, path, new_branch } => {
-            let repo = repository::Repository::open(&PathBuf::from("."))?;
+            let mut repo = repository::Repository::open(&PathBuf::from("."))?;
             if new_branch {
-                //
-                // Create branch at HEAD then switch to it
-                //
-                branch::create(&repo, &branch, None)?;
-                checkout::checkout(&repo, &branch)?;
+                branch::create(&mut repo, &branch, None)?;
+                checkout::checkout(&mut repo, &branch)?;
             } else {
                 match path {
-                    Some(p) => checkout::checkout_path(&repo, &branch, &p)?,
-                    None    => checkout::checkout(&repo, &branch)?,
+                    Some(p) => checkout::checkout_path(&mut repo, &branch, &p)?,
+                    None => checkout::checkout(&mut repo, &branch)?,
                 }
             }
         }
 
         Commands::Branch { name, at, delete, force_delete, rename_to } => {
-            let repo = Repository::open(&PathBuf::from("."))?;
+            let mut repo = Repository::open(&PathBuf::from("."))?;
 
             if let Some(branch) = delete {
-                branch::delete(&repo, &branch)?;
+                branch::delete(&mut repo, &branch)?;
             } else if let Some(branch) = force_delete {
-                branch::force_delete(&repo, &branch)?;
+                branch::force_delete(&mut repo, &branch)?;
             } else if rename_to.len() == 2 {
                 branch::rename(&repo, &rename_to[0], &rename_to[1])?;
             } else if let Some(name) = name {
-                branch::create(&repo, &name, at.as_deref())?;
+                branch::create(&mut repo, &name, at.as_deref())?;
             } else {
                 branch::list(&repo)?;
             }
         }
 
         Commands::Add { files } => {
-            let repo = Repository::open(&PathBuf::from("."))?;
-            add::add(&repo, &files)?;
+            let mut repo = Repository::open(&PathBuf::from("."))?;
+            add::add(&mut repo, &files)?;
+        }
+
+        Commands::Remove { files } => {
+            let mut repo = Repository::open(&PathBuf::from("."))?;
+            remove::remove(&mut repo, &files)?;
+        }
+
+        Commands::Status => {
+            let mut repo = Repository::open(&PathBuf::from("."))?;
+            status::status(&mut repo)?;
         }
 
         Commands::Commit { message, author } => {
-            let repo = Repository::open(&PathBuf::from("."))?;
+            let mut repo = Repository::open(&PathBuf::from("."))?;
             let index = index::Index::load(&repo.root)?;
             if index.count == 0 {
                 eprintln!("nothing staged to commit (use 'vx add <file>'...)");
                 return Ok(());
             }
-            let tree = index.write_tree_recursive(&repo)?;
+            let tree = index.write_tree(&mut repo)?;
             let parent = repo.read_head_commit().ok();
-            commit::commit(&repo, tree, parent, &author, &message)?;
+            commit::commit(&mut repo, tree, parent, &author, &message)?;
         }
     }
 

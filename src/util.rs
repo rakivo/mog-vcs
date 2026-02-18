@@ -1,12 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use xxhash_rust::xxh3::Xxh3DefaultBuilder;
 
 pub type Xxh3HashSet<K> = HashSet<K, Xxh3DefaultBuilder>;
-
-pub fn make_xxh3_hashset<K>() -> HashSet<K, Xxh3DefaultBuilder> {
-    HashSet::with_hasher(Xxh3DefaultBuilder::new())
-}
+pub type Xxh3HashMap<K, V> = HashMap<K, V, Xxh3DefaultBuilder>;
 
 /// `std::vec::Vec::into_boxed_slice` takes CPU cycles to shrink
 /// itself to the `.len`, this function does not shrink and saves
@@ -20,4 +17,51 @@ pub fn vec_into_boxed_slice_noshrink<T>(mut v: Vec<T>) -> Box<[T]> {
     core::mem::forget(v);
 
     unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(ptr, len)) }
+}
+
+#[macro_export]
+macro_rules! payload_triple {
+    (
+        owned $Owned:ident {
+            $( $owned_field:ident : $owned_ty:ty ),+ $(,)?
+        }
+        view $View:ident <'a> {
+            $( $view_field:ident : $view_ty:ty ),+ $(,)?
+        }
+        ref $Ref:ident <'a> {
+            $( $ref_field:ident : $ref_ty:ty ),+ $(,)?
+        }
+        view_from_owned($owned:ident) $from_owned:block
+        view_from_ref($r:ident) $from_ref:block
+    ) => {
+        pub struct $Owned {
+            $( pub $owned_field: $owned_ty, )+
+        }
+
+        pub struct $View<'a> {
+            $( pub $view_field: $view_ty, )+
+        }
+
+        pub struct $Ref<'a> {
+            $( pub $ref_field: $ref_ty, )+
+        }
+
+        #[allow(unused)]
+        impl $Owned {
+            #[inline]
+            pub fn view(&self) -> $View<'_> {
+                let $owned = self;
+                $from_owned
+            }
+        }
+
+        #[allow(unused)]
+        impl<'a> $Ref<'a> {
+            #[inline]
+            pub fn view(self) -> $View<'a> {
+                let $r = self;
+                $from_ref
+            }
+        }
+    };
 }

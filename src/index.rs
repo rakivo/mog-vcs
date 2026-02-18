@@ -1,13 +1,18 @@
 use crate::hash::Hash;
-use crate::object::{Object, Tree, MODE_DIR, MODE_EXEC, MODE_FILE};
+use crate::object::{MODE_DIR, MODE_EXEC, MODE_FILE};
 use crate::repository::Repository;
-use crate::tree_builder::TreeBuilder;
+use crate::object::Object;
+use crate::store::TreeId;
+use crate::tree::TreeEntry;
+use crate::tracy;
+use crate::util::Xxh3HashMap;
 
-use std::borrow::Cow;
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::Path;
 use std::fs;
 
 use anyhow::{Result, bail};
+use xxhash_rust::xxh3::xxh3_64;
 
 const INDEX_MAGIC: &[u8; 4] = b"VXIX";
 const INDEX_VERSION: u32 = 1;
@@ -41,9 +46,11 @@ pub struct Index {
     pub mtimes: Vec<i64>,
     pub sizes:  Vec<u64>,
 
-    // (only touched when path is actually needed)
     pub path_offsets: Vec<u32>,
     pub paths_blob:   Vec<u8>,
+
+    /// Path hash -> entry index (or indices on collision). No duplicate path storage.
+    path_index: Xxh3HashMap<u64, Vec<usize>>,
 }
 
 pub struct IndexEntryRef<'a> {
@@ -86,6 +93,8 @@ impl<'index> Iterator for IndexIter<'index> {
 impl Index {
     #[inline]
     pub fn load(repo_root: &Path) -> Result<Self> {
+        let _span = tracy::span!("Index::load");
+
         let path = repo_root.join(".vx/index");
         if !path.exists() {
             return Ok(Self::default());
@@ -97,6 +106,8 @@ impl Index {
 
     #[inline]
     pub fn save(&self, repo_root: &Path) -> Result<()> {
+        let _span = tracy::span!("Index::save");
+
         let path = repo_root.join(".vx/index");
         fs::write(path, self.encode())?;
         Ok(())
@@ -218,9 +229,9 @@ impl Index {
 
         // Paths blob
         let blob_len = read_u32!() as usize;
-        let paths_blob = data[cur..cur+blob_len].to_vec();
+        let paths_blob = data[cur..cur + blob_len].to_vec();
 
-        Ok(Self {
+        let mut index = Self {
             count,
             modes,
             hashes,
@@ -228,7 +239,24 @@ impl Index {
             sizes,
             path_offsets,
             paths_blob,
-        })
+            path_index: HashMap::default(),
+        };
+        index.build_path_index();
+        Ok(index)
+    }
+
+    #[inline]
+    fn path_hash(path: &str) -> u64 {
+        xxh3_64(path.as_bytes())
+    }
+
+    fn build_path_index(&mut self) {
+        self.path_index.clear();
+        self.path_index.reserve(self.count);
+        for i in 0..self.count {
+            let h = Self::path_hash(self.get_path(i));
+            self.path_index.entry(h).or_default().push(i);
+        }
     }
 
     // Get path string for entry i
@@ -249,19 +277,17 @@ impl Index {
         Self::get_path_impl(self.count, &self.path_offsets, &self.paths_blob, i)
     }
 
-    // Linear scan for path -> index.
-    // Good enough for typical repo sizes (<10k files).
-    // Can be replaced with sorted index + binary search later.
     #[inline]
     pub fn find(&self, path: &Path) -> Option<usize> {
-        let target = path.to_str()?;
-        (0..self.count).find(|&i| self.get_path(i) == target)
+        let path_str = path.to_str()?;
+        let h = Self::path_hash(path_str);
+        let list = self.path_index.get(&h)?;
+        list.iter().copied().find(|&i| self.get_path(i) == path_str)
     }
 
-    // Add or update a file entry.
-    // If the path already exists in the index, update it in place.
-    // If it's new, append to all arrays.
     pub fn add(&mut self, path: &Path, hash: Hash, meta: &fs::Metadata) {
+        let _span = tracy::span!("Index::add");
+
         let path_str = path.to_str().expect("non-utf8 path");
 
         let mtime = meta
@@ -274,12 +300,14 @@ impl Index {
         let mode = if is_executable(meta) { MODE_EXEC } else { MODE_FILE };
         let size = meta.len();
 
-        if let Some(i) = self.find(path) {
+        let h = Self::path_hash(path_str);
+        if let Some(i) = self.path_index.get(&h).and_then(|list| {
+            list.iter().copied().find(|&idx| self.get_path(idx) == path_str)
+        }) {
             self.modes[i]  = mode;
             self.hashes[i] = hash;
             self.mtimes[i] = mtime;
             self.sizes[i]  = size;
-
             return;
         }
 
@@ -289,14 +317,22 @@ impl Index {
         self.sizes.push(size);
         self.path_offsets.push(self.paths_blob.len() as u32);
         self.paths_blob.extend_from_slice(path_str.as_bytes());
+        self.path_index.entry(h).or_default().push(self.count);
         self.count += 1;
     }
 
-    // Remove an entry by path.
-    // Rebuilds paths_blob (unavoidable with variable-length strings).
-    // Returns true if the entry existed.
     pub fn remove(&mut self, path: &Path) -> bool {
-        let Some(i) = self.find(path) else { return false; };
+        let path_str = path.to_str().expect("non-utf8 path");
+        let h = Self::path_hash(path_str);
+        let (pos, i) = match self.path_index.get(&h) {
+            Some(list) => {
+                let Some(pos) = list.iter().position(|&idx| self.get_path(idx) == path_str) else {
+                    return false;
+                };
+                (pos, list[pos])
+            }
+            None => return false,
+        };
 
         self.modes.remove(i);
         self.hashes.remove(i);
@@ -306,16 +342,25 @@ impl Index {
         let owned_path_offsets = core::mem::take(&mut self.path_offsets);
         let owned_path_blob = core::mem::take(&mut self.paths_blob);
 
-        let filtered_path_indexes = (0..self.count).filter(|&j| j != i);
-
-        for index in filtered_path_indexes {
+        for index in (0..self.count).filter(|&j| j != i) {
             let p = Self::get_path_impl(self.count, &owned_path_offsets, &owned_path_blob, index);
-
             self.path_offsets.push(self.paths_blob.len() as u32);
             self.paths_blob.extend_from_slice(p.as_bytes());
         }
 
         self.count -= 1;
+        let list = self.path_index.get_mut(&h).unwrap();
+        list.remove(pos);
+        if list.is_empty() {
+            self.path_index.remove(&h);
+        }
+        for list in self.path_index.values_mut() {
+            for idx in list.iter_mut() {
+                if *idx > i {
+                    *idx -= 1;
+                }
+            }
+        }
         true
     }
 
@@ -323,20 +368,44 @@ impl Index {
     #[inline]
     pub fn update_from_tree_recursive(
         &mut self,
-        repo: &Repository,
-        tree: &Tree,
+        repo: &mut Repository,
+        tree_id: TreeId,
         prefix: &str,
     ) -> Result<()> {
-        for entry in tree {
-            let path = format!("{prefix}/{}", entry.name);
+        let n = repo.tree_store.entry_count(tree_id);
+        for j in 0..n {
+            let TreeEntry { hash, name, .. } = repo.tree_store.get_entry(tree_id, j);
 
-            match repo.storage.read(entry.hash)? {
+            let obj = repo.read_object(&hash)?;
+            match obj {
                 Object::Blob(_) => {
-                    let abs      = repo.root.join(&path);
-                    let metadata = fs::metadata(&abs)?;
-                    self.add(path.as_ref(), *entry.hash, &metadata);
+                    if prefix.is_empty() {
+                        let abs = repo.root.join(name.as_ref());
+                        let metadata = fs::metadata(&abs)?;
+                        let name_path: &Path = name.as_ref().as_ref();
+                        self.add(name_path, hash, &metadata);
+                    } else {
+                        let mut path = String::with_capacity(prefix.len() + 1 + name.len());
+                        path.push_str(prefix);
+                        path.push('/');
+                        path.push_str(&name);
+                        let abs = repo.root.join(&path);
+                        let metadata = fs::metadata(&abs)?;
+                        self.add(path.as_ref(), hash, &metadata);
+                    }
                 }
-                Object::Tree(subtree) => self.update_from_tree_recursive(repo, &subtree, &path)?,
+                Object::Tree(sub_id) => {
+                    let path = if prefix.is_empty() {
+                        name
+                    } else {
+                        let mut path = String::with_capacity(prefix.len() + 1 + name.len());
+                        path.push_str(prefix);
+                        path.push('/');
+                        path.push_str(&name);
+                        path.into()
+                    };
+                    self.update_from_tree_recursive(repo, sub_id, &path)?;
+                }
                 Object::Commit(_) => {}
             }
         }
@@ -347,6 +416,8 @@ impl Index {
     // Fast dirty check: compare mtime + size before hashing.
     // Returns true if the file MIGHT be modified (triggers full hash check).
     pub fn is_dirty(&self, i: usize, metadata: &fs::Metadata) -> bool {
+        let _span = tracy::span!("Index::is_dirty");
+
         let mtime = metadata
             .modified()
             .unwrap()
@@ -365,7 +436,7 @@ impl Index {
     // Build and write tree objects from index entries.
     // Groups entries by directory, recursively builds subtrees bottom-up.
     #[inline]
-    pub fn write_tree_recursive(&self, repo: &Repository) -> Result<Hash> {
+    pub fn write_tree(&self, repo: &mut Repository) -> Result<Hash> {
         //
         // Sort entries by path
         //
@@ -374,12 +445,12 @@ impl Index {
         order.sort_unstable_by_key(|&i| self.get_path(i));
 
         let sorted_paths  = order.iter().map(|&i| self.get_path(i)).collect::<Vec<_>>();
-        let sorted_modes  = order.iter().map(|&i| self.modes[i]).collect::<Vec<_>>();;
-        let sorted_hashes = order.iter().map(|&i| self.hashes[i]).collect::<Vec<_>>();;
+        let sorted_modes  = order.iter().map(|&i| self.modes[i]).collect::<Vec<_>>();
+        let sorted_hashes = order.iter().map(|&i| self.hashes[i]).collect::<Vec<_>>();
 
-        // Single recursive pass over the sorted array
-        // Each call consumes a contiguous slice = one directory
-        let (hash, consumed) = build_tree_recursive(
+        // Single pass over the sorted array.
+        // Consumes a contiguous slice = one directory (implemented iteratively, no recursion).
+        let (hash, _consumed) = build_tree(
             repo,
             &sorted_paths,
             &sorted_modes,
@@ -394,79 +465,121 @@ impl Index {
 
 // Builds a tree for `dir` by consuming a contiguous slice of sorted entries.
 // Returns (tree_hash, how_many_entries_consumed).
-fn build_tree_recursive(
-    repo: &Repository,
+//
+// This is a hot path for `vx commit` and is intentionally implemented without recursion.
+fn build_tree(
+    repo: &mut Repository,
     paths:  &[&str],
     modes:  &[u32],
     hashes: &[Hash],
     dir:    &str,         // current directory prefix e.g. "src/foo"
     start:  usize,        // where in the slice we are
 ) -> Result<(Hash, usize)> {
-    let mut builder = TreeBuilder::new();
+    struct Frame<'a> {
+        /// Directory prefix (repo-relative, no leading slash), e.g. "src/foo". Root is "".
+        dir: &'a str,
+        /// Index into `paths` where this directory starts.
+        start: usize,
+        /// Name to use when adding this directory to its parent. Root has None.
+        name_in_parent: Option<&'a str>,
+        tree_entries_buffer: Vec<TreeEntry>
+    }
+
+    let mut stack: Vec<Frame<'_>> = Vec::new();
+    stack.push(Frame {
+        dir,
+        start,
+        name_in_parent: None,
+        tree_entries_buffer: Vec::new()
+    });
+
     let mut i = start;
 
-    while i < paths.len() {
-        let path = paths[i];
+    loop {
+        let (cur_dir, cur_dir_len) = {
+            let f = stack.last().expect("non-empty stack");
+            (f.dir, f.dir.len())
+        };
 
-        //
-        // Stop if this path is no longer inside our directory
-        //
-        let inside = if dir.is_empty() {
+        // Finish the current frame if the next path is outside it (or we've run out of paths).
+        let finish_now = if i >= paths.len() {
             true
+        } else if cur_dir.is_empty() {
+            false
         } else {
-            path.starts_with(dir) && path.as_bytes().get(dir.len()) == Some(&b'/')
+            let path_norm = paths[i].trim_start_matches('/');
+            !(path_norm.starts_with(cur_dir) && path_norm.as_bytes().get(cur_dir_len) == Some(&b'/'))
         };
 
-        if !inside { break; }
+        if finish_now {
+            let done = stack.pop().expect("non-empty stack");
 
-        // Get the part of the path relative to current dir
-        let rel = if dir.is_empty() {
-            path
+            let tree_id = repo.tree_store.extend(&done.tree_entries_buffer);
+            let hash = repo.write_object(Object::Tree(tree_id));
+            let consumed = i - done.start;
+
+            if let Some(parent) = stack.last_mut() {
+                let name = done.name_in_parent.expect("non-root frame must have a name");
+                parent.tree_entries_buffer.push(TreeEntry {
+                    mode: MODE_DIR,
+                    hash,
+                    name: name.into() // @Clone
+                });
+                continue;
+            }
+
+            return Ok((hash, consumed));
+        }
+
+        let path_norm = paths[i].trim_start_matches('/');
+        let rel = if cur_dir.is_empty() {
+            path_norm
         } else {
-            &path[dir.len() + 1..]  // skip "dir/"
+            &path_norm[cur_dir_len + 1..] // skip "dir/"
         };
 
-        // Is this a direct child or does it go deeper?
+        if rel.is_empty() {
+            i += 1;
+            continue;
+        }
+
         match rel.find('/') {
             None => {
-                //
                 // Direct file child - add blob entry
-                //
-                builder.add(modes[i], hashes[i], rel);
+                let top = stack.last_mut().expect("non-empty stack");
+                top.tree_entries_buffer.push(TreeEntry {
+                    mode: modes[i],
+                    hash: hashes[i],
+                    name: rel.into() // @Clone
+                });
                 i += 1;
             }
             Some(slash) => {
-                //
-                // Goes into a subdirectory - find the subdir name
-                //
+                // Subdirectory - push a new frame and build it first (post-order)
                 let subdir_name = &rel[..slash];
-                let subdir_full = if dir.is_empty() {
-                    Cow::Borrowed(subdir_name)
+                if subdir_name.is_empty() {
+                    // Defensive: avoid infinite loops if paths contain repeated/leading slashes.
+                    i += 1;
+                    continue;
+                }
+
+                let subdir_full = if cur_dir.is_empty() {
+                    // Root: subdir is the prefix up to the first slash.
+                    &path_norm[..slash]
                 } else {
-                    Cow::Owned(format!("{dir}/{subdir_name}"))
+                    // Non-root: prefix "dir/subdir".
+                    &path_norm[..cur_dir_len + 1 + slash]
                 };
 
-                //
-                // Recursively build subtree, consuming all entries under it
-                //
-                let (subtree_hash, consumed) = build_tree_recursive(
-                    repo,
-                    paths,
-                    modes,
-                    hashes,
-                    &subdir_full,
-                    i,
-                )?;
-
-                builder.add(MODE_DIR, subtree_hash, subdir_name);
-                i += consumed;
+                stack.push(Frame {
+                    dir: subdir_full,
+                    start: i,
+                    name_in_parent: Some(subdir_name),
+                    tree_entries_buffer: Vec::new()
+                });
             }
         }
     }
-
-    let tree = builder.build();
-    let hash = repo.storage.write(&Object::Tree(tree))?;
-    Ok((hash, i - start))
 }
 
 #[cfg(unix)]

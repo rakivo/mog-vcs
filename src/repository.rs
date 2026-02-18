@@ -1,5 +1,8 @@
-use crate::object::{Commit, Object};
+use crate::cache::EncodedCache;
+use crate::ignore::Ignore;
 use crate::storage::Storage;
+use crate::object::Object;
+use crate::store::{decode_into_stores, encode_object_into, object_hash, BlobStore, CommitId, CommitStore, TreeStore};
 use crate::hash::{Hash, hash_to_hex, hex_to_hash};
 use crate::util::Xxh3HashSet;
 
@@ -10,6 +13,11 @@ use anyhow::{Result, bail};
 pub struct Repository {
     pub root: PathBuf,
     pub storage: Storage,
+    pub ignore: Ignore,
+    pub object_cache: EncodedCache,
+    pub blob_store: BlobStore,
+    pub tree_store: TreeStore,
+    pub commit_store: CommitStore,
 }
 
 impl Repository {
@@ -27,9 +35,32 @@ impl Repository {
             b"ref: refs/heads/main\n"
         )?;
 
+        let root = path.canonicalize()?;
+        let mogged = root.join(".mogged");
+        if !mogged.exists() {
+            std::fs::write(
+                &mogged,
+                "# .mogged: ignore rules (repo-root-relative)\n\
+# Lines ending with / ignore a directory prefix.\n\
+# * and ? are supported.\n\
+\n\
+.vx/\n\
+.git/\n\
+target/\n\
+.idea/\n\
+*.swp\n\
+*.tmp\n"
+            )?;
+        }
+
         Ok(Self {
-            root: path.canonicalize()?.to_path_buf(),
-            storage: Storage::new(vx_dir),
+            ignore: Ignore::load(&root)?,
+            root,
+            storage: Storage::new(&vx_dir)?,
+            object_cache: EncodedCache::default(),
+            blob_store: BlobStore::default(),
+            tree_store: TreeStore::default(),
+            commit_store: CommitStore::default(),
         })
     }
 
@@ -41,10 +72,49 @@ impl Repository {
             bail!("not a vx repository");
         }
 
+        let root = path.canonicalize()?;
         Ok(Self {
-            root: path.canonicalize()?.to_path_buf(),
-            storage: Storage::new(vx_dir),
+            ignore: Ignore::load(&root)?,
+            root,
+            storage: Storage::new(&vx_dir)?,
+            object_cache: EncodedCache::default(),
+            blob_store: BlobStore::default(),
+            tree_store: TreeStore::default(),
+            commit_store: CommitStore::default(),
         })
+    }
+
+    /// Read object by hash; decode into stores and return Object(id). Uses 1MB encoded-bytes cache.
+    pub fn read_object(&mut self, hash: &Hash) -> Result<Object> {
+        if let Some(cached) = self.object_cache.get(hash) {
+            return decode_into_stores(
+                cached,
+                &mut self.blob_store,
+                &mut self.tree_store,
+                &mut self.commit_store,
+            );
+        }
+        let data = self.storage.read(hash)?;
+        let obj = decode_into_stores(
+            &data,
+            &mut self.blob_store,
+            &mut self.tree_store,
+            &mut self.commit_store,
+        )?;
+        self.object_cache.insert(*hash, data);
+        Ok(obj)
+    }
+
+    /// Encode from stores, hash, push to storage. Returns hash.
+    pub fn write_object(&mut self, obj: Object) -> Hash {
+        let hash = object_hash(obj, &self.blob_store, &self.tree_store, &self.commit_store);
+
+        let mut buf = Vec::new();
+        encode_object_into(obj, &self.blob_store, &self.tree_store, &self.commit_store, &mut buf);
+
+        self.storage.write(hash, buf);
+
+        hash
     }
 
     #[inline]
@@ -92,89 +162,79 @@ impl Repository {
             let branch = refpath
                 .trim()
                 .strip_prefix("refs/heads/")
-                .map(|s| s.to_string());
+                .map(ToString::to_string);
             Ok(branch)
         } else {
             Ok(None) // detached
         }
     }
 
-    // Resolve a branch name or commit hash to a Commit object
-    #[inline]
-    pub fn resolve_to_commit(&self, target: &str) -> Result<Commit> {
-        //
-        // Try as branch first
-        //
-        let branch_ref  = format!("refs/heads/{target}");
+    /// Resolve branch or hex to (`commit_hash`, `CommitId`).
+    pub fn resolve_to_commit(&mut self, target: &str) -> Result<(Hash, CommitId)> {
+        let branch_ref = format!("refs/heads/{target}");
         let branch_path = self.root.join(".vx").join(&branch_ref);
 
         let hash = if branch_path.exists() {
             self.read_ref(&branch_ref)?
         } else {
-            //
-            // Try as raw commit hash
-            //
             hex_to_hash(target)?
         };
 
-        self.storage.read(&hash)?.try_into_commit()
+        let obj = self.read_object(&hash)?;
+        let commit_id = obj.try_as_commit_id()?;
+        Ok((hash, commit_id))
     }
 
-    // Walk commit graph from `start`, collecting all reachable commit hashes.
-    // Used for merge-safety check on delete.
-    #[inline]
-    pub fn reachable_commits(&self, start: &Hash) -> Xxh3HashSet<Hash> {
+    /// Walk commit graph from start, collecting reachable hashes.
+    pub fn reachable_commits(&mut self, start: &Hash) -> Xxh3HashSet<Hash> {
         let mut visited = Xxh3HashSet::default();
-        let mut stack   = vec![*start];
+        let mut stack = vec![*start];
 
         while let Some(hash) = stack.pop() {
-            if visited.contains(&hash) { continue; }
+            if visited.contains(&hash) {
+                continue;
+            }
             visited.insert(hash);
 
-            if let Ok(commit) = self.storage.read(&hash).and_then(Object::try_into_commit) {
-                stack.extend(commit.parents);
+            if let Ok(obj) = self.read_object(&hash) {
+                if let Ok(id) = obj.try_as_commit_id() {
+                    stack.extend(self.commit_store.get_parents(id));
+                }
             }
         }
 
         visited
     }
 
-    // Walk a tree object following path components.
-    // e.g. path = "src/foo/bar.rs"
-    //   -> look for "src" in root tree  (Tree)
-    //   -> look for "foo" in src tree   (Tree)
-    //   -> look for "bar.rs" in foo tree (Blob)
-    //   -> return the Blob
-    pub fn walk_tree_path(&self, tree_hash: &Hash, path: &str) -> Result<(Object, Hash)> {
-        let mut current = self.storage.read(tree_hash)?.try_into_tree()?;
+    /// Walk tree at `tree_hash` following path; return (Object, `entry_hash`).
+    pub fn walk_tree_path(&mut self, tree_hash: &Hash, path: &str) -> Result<(Object, Hash)> {
+        let obj = self.read_object(tree_hash)?;
+        let mut current_id = obj.try_as_tree_id()?;
 
-        let components = path
-            .trim_matches('/')  // strip leading/trailing slashes
+        let components: Vec<&str> = path
+            .trim_matches('/')
             .split('/')
             .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
+            .collect();
 
         if components.is_empty() {
             bail!("empty path");
         }
 
-        //
-        // Walk all components except the last - each must be a tree
-        //
         for &component in &components[..components.len() - 1] {
-            let hash = current.find_in_tree(component)
+            let hash = self.tree_store
+                .find_entry(current_id, component)
                 .ok_or_else(|| anyhow::anyhow!("path not found: '{component}'"))?;
-
-            current = self.storage.read(hash)?.try_into_tree()?;
+            let obj = self.read_object(&hash)?;
+            current_id = obj.try_as_tree_id()?;
         }
 
-        //
-        // Last component can be either blob or tree
-        //
         let last = components[components.len() - 1];
-        let hash = current.find_in_tree(last)
+        let hash = self.tree_store
+            .find_entry(current_id, last)
             .ok_or_else(|| anyhow::anyhow!("path not found: '{last}'"))?;
 
-        self.storage.read(hash).map(|object| (object, *hash))
+        let obj = self.read_object(&hash)?;
+        Ok((obj, hash))
     }
 }

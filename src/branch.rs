@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use anyhow::{Result, bail};
 use crate::{
-    hash::{hash_to_hex, hex_to_hash, Hash},
-    object::Object,
-    repository::Repository, util::Xxh3HashSet,
+    hash::{hash_to_hex, hex_to_hash},
+    repository::Repository,
+    util::Xxh3HashSet,
 };
 
 #[inline]
@@ -27,7 +27,7 @@ pub fn list(repo: &Repository) -> Result<()> {
     let current = repo.current_branch().unwrap_or(None);
 
     let mut branches = std::fs::read_dir(&heads_dir)?
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter_map(|e| e.file_name().into_string().ok())
         .collect::<Vec<_>>();
 
@@ -35,9 +35,10 @@ pub fn list(repo: &Repository) -> Result<()> {
 
     for branch in branches {
         let marker = if current.as_deref() == Some(&branch) { "* " } else { "  " };
-        let hash   = repo.read_ref(&format!("refs/heads/{branch}"))
-            .map(|h| hash_to_hex(&h)[..8].to_string())
-            .unwrap_or_else(|_| "?".to_string());
+        let hash = repo.read_ref(&format!("refs/heads/{branch}")).map_or_else(
+            |_| "?".to_string(),
+            |h| hash_to_hex(&h)[..8].to_string()
+        );
 
         println!("{marker}{branch}  {hash}");
     }
@@ -46,19 +47,16 @@ pub fn list(repo: &Repository) -> Result<()> {
 }
 
 /// Create a new branch pointing at `target` (branch name, commit hash, or HEAD).
-pub fn create(repo: &Repository, name: &str, target: Option<&str>) -> Result<()> {
+pub fn create(repo: &mut Repository, name: &str, target: Option<&str>) -> Result<()> {
     if branch_exists(repo, name) {
         bail!("branch '{name}' already exists");
     }
 
     validate_branch_name(name)?;
 
-    //
-    // Resolve target to a commit hash
-    //
     let hash = match target {
         Some(t) => {
-            let branch_ref  = format!("refs/heads/{t}");
+            let branch_ref = format!("refs/heads/{t}");
             let branch_path = repo.root.join(".vx").join(&branch_ref);
             if branch_path.exists() {
                 repo.read_ref(&branch_ref)?
@@ -66,16 +64,11 @@ pub fn create(repo: &Repository, name: &str, target: Option<&str>) -> Result<()>
                 hex_to_hash(t)?
             }
         }
-
         None => repo.read_head_commit()?,
     };
 
-    //
-    // Verify it actually points to a commit
-    //
-    repo.storage.read(&hash)?
-        .try_into_commit()
-        .map_err(|_| anyhow::anyhow!("target does not resolve to a commit"))?;
+    let obj = repo.read_object(&hash)?;
+    obj.try_as_commit_id().map_err(|_| anyhow::anyhow!("target does not resolve to a commit"))?;
 
     repo.write_ref(&format!("refs/heads/{name}"), &hash)?;
     println!("created branch '{name}' at {}", &hash_to_hex(&hash)[..8]);
@@ -84,7 +77,7 @@ pub fn create(repo: &Repository, name: &str, target: Option<&str>) -> Result<()>
 }
 
 /// Safe delete - refuses if the branch has commits not reachable from any other branch.
-pub fn delete(repo: &Repository, name: &str) -> Result<()> {
+pub fn delete(repo: &mut Repository, name: &str) -> Result<()> {
     if !branch_exists(repo, name) {
         bail!("branch '{name}' not found");
     }
@@ -99,13 +92,16 @@ pub fn delete(repo: &Repository, name: &str) -> Result<()> {
     // Check if branch_hash is reachable from any OTHER branch
     //
     let heads_dir = repo.root.join(".vx/refs/heads");
-    let other_reachable = std::fs::read_dir(&heads_dir)?
-        .filter_map(|e| e.ok())
+    let other_heads = std::fs::read_dir(&heads_dir)?
+        .filter_map(Result::ok)
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|b| b != name)
         .filter_map(|b| repo.read_ref(&format!("refs/heads/{b}")).ok())
-        .flat_map(|h| repo.reachable_commits(&h))
-        .collect::<Xxh3HashSet<_>>();
+        .collect::<Vec<_>>();
+    let mut other_reachable = Xxh3HashSet::default();
+    for h in other_heads {
+        other_reachable.extend(repo.reachable_commits(&h));
+    }
 
     if !other_reachable.contains(&branch_hash) {
         bail!(
@@ -120,7 +116,7 @@ pub fn delete(repo: &Repository, name: &str) -> Result<()> {
 }
 
 /// Force delete - no safety check.
-pub fn force_delete(repo: &Repository, name: &str) -> Result<()> {
+pub fn force_delete(repo: &mut Repository, name: &str) -> Result<()> {
     if !branch_exists(repo, name) {
         bail!("branch '{name}' not found");
     }

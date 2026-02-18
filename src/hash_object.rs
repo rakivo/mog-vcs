@@ -1,19 +1,23 @@
 use std::path::Path;
 use std::fs;
 use anyhow::Result;
-use crate::object::{Object, Blob};
 use crate::repository::Repository;
+use crate::object::Object;
+use crate::store::blob_encode_and_hash;
 use crate::hash::hash_to_hex;
 
-pub fn hash_object(repo: &Repository, path: &Path, write: bool) -> Result<()> {
+pub fn hash_object(repo: &mut Repository, path: &Path, write: bool) -> Result<()> {
     let data = fs::read(path)?;
-    let blob = Blob { data: crate::util::vec_into_boxed_slice_noshrink(data) };
-    let obj = Object::Blob(blob);
+    let blob_id = repo.blob_store.push(&data);
 
     let hash = if write {
-        repo.storage.write(&obj)?
+        let hash = repo.write_object(Object::Blob(blob_id));
+        // Persist immediately when writing objects via this command.
+        repo.storage.flush()?;
+        hash
     } else {
-        obj.hash()
+        let mut buf = Vec::new();
+        blob_encode_and_hash(&repo.blob_store, blob_id, &mut buf)
     };
 
     println!("{}", hash_to_hex(&hash));

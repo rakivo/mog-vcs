@@ -1,29 +1,40 @@
 use std::path::Path;
-use std::fs;
+use std::fs::{self, DirEntry};
 use anyhow::Result;
 use crate::repository::Repository;
-use crate::object::{Object, Blob, MODE_FILE, MODE_EXEC, MODE_DIR};
-use crate::tree_builder::TreeBuilder;
+use crate::object::{MODE_FILE, MODE_EXEC, MODE_DIR};
+use crate::object::Object;
+use crate::tree::TreeEntry;
 use crate::hash::Hash;
 
-pub fn write_tree(repo: &Repository, dir: &Path) -> Result<Hash> {
-    write_tree_recursive(repo, dir)
+pub fn write_tree(repo: &mut Repository, dir: &Path) -> Result<Hash> {
+    let hash = write_tree_recursive(repo, dir)?;
+    repo.storage.flush()?;
+    Ok(hash)
 }
 
-fn write_tree_recursive(repo: &Repository, dir: &Path) -> Result<Hash> {
-    let mut builder = TreeBuilder::new();
+fn write_tree_recursive(repo: &mut Repository, dir: &Path) -> Result<Hash> {
+    let mut tree_entries_buffer = Vec::new();
 
     let mut entries = fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .collect::<Vec<_>>();
 
-    entries.sort_by_key(|e| e.file_name());
+    entries.sort_by_key(DirEntry::file_name);
 
     for entry in entries {
         let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
 
-        // Skip .vx directory
+        // Ignore rules (repo-root-relative). Tracked files should use `vx add` instead.
+        if let Ok(rel) = path.strip_prefix(&repo.root) {
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            if repo.ignore.is_ignored_rel(&rel_str) {
+                continue;
+            }
+        }
+
         if name == ".vx" {
             continue;
         }
@@ -31,27 +42,36 @@ fn write_tree_recursive(repo: &Repository, dir: &Path) -> Result<Hash> {
         let metadata = entry.metadata()?;
 
         if metadata.is_dir() {
-            // Recursively write subtree
             let hash = write_tree_recursive(repo, &path)?;
-            builder.add(MODE_DIR, hash, &name);
-        } else {
-            // Write blob
-            let data = fs::read(&path)?;
-            let blob = Blob { data: crate::util::vec_into_boxed_slice_noshrink(data) };
-            let hash = repo.storage.write(&Object::Blob(blob))?;
+            tree_entries_buffer.push(TreeEntry {
+                hash,
+                name: name.into(), // @Clone
+                mode: MODE_DIR,
+            });
 
-            let mode = if is_executable(&metadata) {
-                MODE_EXEC
-            } else {
-                MODE_FILE
-            };
-
-            builder.add(mode, hash, &name);
+            continue;
         }
+
+        let data = fs::read(&path)?;
+        let blob_id = repo.blob_store.push(&data);
+        let hash = repo.write_object(Object::Blob(blob_id));
+
+        let mode = if is_executable(&metadata) {
+            MODE_EXEC
+        } else {
+            MODE_FILE
+        };
+
+        tree_entries_buffer.push(TreeEntry {
+            hash,
+            name: name.into(), // @Clone
+            mode,
+        });
     }
 
-    let tree = builder.build();
-    repo.storage.write(&Object::Tree(tree))
+    let tree_id = repo.tree_store.extend(&tree_entries_buffer);
+    let hash = repo.write_object(Object::Tree(tree_id));
+    Ok(hash)
 }
 
 #[cfg(unix)]
