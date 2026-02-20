@@ -1,4 +1,4 @@
-use crate::cache::EncodedCache;
+use crate::cache::ObjectCache;
 use crate::ignore::Ignore;
 use crate::storage::Storage;
 use crate::object::{encode_blob_and_hash, hash_object, Object};
@@ -16,7 +16,7 @@ pub struct Repository {
     pub root: Box<Path>,
     pub storage: Storage,
     pub ignore: Ignore,
-    pub object_cache: EncodedCache,
+    pub object_cache: ObjectCache,
     pub stores: Stores
 }
 
@@ -68,7 +68,7 @@ target/\n\
             ignore: Ignore::load(&root)?,
             root,
             storage: Storage::new(&mog_dir)?,
-            object_cache: EncodedCache::default(),
+            object_cache: ObjectCache::default(),
             stores: Stores::default(),
         })
     }
@@ -87,7 +87,7 @@ target/\n\
             ignore: Ignore::load(&root)?,
             root,
             storage: Storage::new(&mog_dir)?,
-            object_cache: EncodedCache::default(),
+            object_cache: ObjectCache::default(),
             stores: Stores::default()
         })
     }

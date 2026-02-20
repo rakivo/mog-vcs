@@ -4,18 +4,18 @@ use std::collections::VecDeque;
 const CACHE_MAX_BYTES: usize = 1024 * 1024; // 1 MiB
 
 #[derive(Default)]
-pub struct EncodedCache {
-    map:         Xxh3HashMap<Hash, Vec<u8>>,
+pub struct ObjectCache {
+    map:         Xxh3HashMap<Hash, Box<[u8]>>,
     order:       VecDeque<Hash>,
     total_bytes: usize,
 }
 
-impl EncodedCache {
+impl ObjectCache {
     /// Get encoded bytes by hash, if present. Reference is valid until the next mutating call.
     #[inline]
     #[must_use]
     pub fn get(&self, hash: &Hash) -> Option<&[u8]> {
-        self.map.get(hash).map(std::vec::Vec::as_slice)
+        self.map.get(hash).map(|v| &**v)
     }
 
     #[inline]
@@ -26,11 +26,12 @@ impl EncodedCache {
 
     /// Insert encoded bytes. Evicts oldest entries until total size <= `max_bytes`.
     #[inline]
-    pub fn insert(&mut self, hash: Hash, data: Vec<u8>) {
+    pub fn insert(&mut self, hash: Hash, data: impl Into<Box<[u8]>>) {
         if self.map.contains_key(&hash) {
             return;
         }
 
+        let data = data.into();
         self.total_bytes += data.len();
 
         self.map.insert(hash, data);
