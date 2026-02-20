@@ -118,6 +118,7 @@ pub fn decode_blob_bytes(data: &[u8]) -> Result<&[u8]> {
 
 /// Encode raw bytes as on-disk blob (VX01 + type + len + data).
 #[inline]
+#[must_use]
 pub fn hash_blob(data: &[u8]) -> Hash {
     let mut hasher = blake3::Hasher::new();
 

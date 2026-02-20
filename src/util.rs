@@ -26,12 +26,14 @@ pub fn vec_into_boxed_slice_noshrink<T>(mut v: Vec<T>) -> Box<[T]> {
 }
 
 #[inline]
+#[must_use] 
 pub fn stdout_is_tty() -> bool {
     use std::io::IsTerminal;
     std::io::stdout().is_terminal()
 }
 
 #[inline]
+#[must_use] 
 pub fn is_executable(metadata: &std::fs::Metadata) -> bool {
     #[cfg(unix)] {
         use std::os::unix::fs::PermissionsExt;

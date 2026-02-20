@@ -58,8 +58,7 @@ pub fn checkout_path(repo: &mut Repository, target: &str, path: &str) -> Result<
             println!("restored '{path}'");
         }
         Object::Tree(tree_id) => {
-            let mut prefix = path.to_string();
-            checkout_tree_impl(repo, tree_hash, &mut prefix)?;
+            checkout_tree_impl(repo, tree_hash, path)?;
             index.update_from_tree_recursive(repo, tree_id, path)?;
             index.save(&repo.root)?;
             println!("restored '{path}/'");
@@ -78,8 +77,7 @@ pub fn checkout_commit(repo: &mut Repository, commit_id: CommitId) -> Result<()>
 
 #[inline]
 pub fn checkout_tree(repo: &mut Repository, tree_hash: Hash) -> Result<()> {
-    let mut prefix = String::new();
-    checkout_tree_impl(repo, tree_hash, &mut prefix)
+    checkout_tree_impl(repo, tree_hash, "")
 }
 
 #[inline]
@@ -96,14 +94,14 @@ pub fn checkout_blob_to(repo: &Repository, blob_id: BlobId, to: &str) -> Result<
 pub fn checkout_tree_impl(
     repo: &mut Repository,
     tree_hash: Hash,
-    prefix: &mut String,
+    prefix: &str,
 ) -> Result<()> {
     struct Frame {
         tree_hash: Hash,
         prefix: Box<str>,
     }
 
-    let mut stack = vec![Frame { tree_hash, prefix: prefix.clone().into() }];
+    let mut stack = vec![Frame { tree_hash, prefix: prefix.into() }];
 
     while let Some(Frame { tree_hash, prefix: frame_prefix }) = stack.pop() {
         let entries = {

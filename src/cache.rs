@@ -15,7 +15,7 @@ impl EncodedCache {
     #[inline]
     #[must_use]
     pub fn get(&self, hash: &Hash) -> Option<&[u8]> {
-        self.map.get(hash).map(|v| v.as_slice())
+        self.map.get(hash).map(std::vec::Vec::as_slice)
     }
 
     #[inline]

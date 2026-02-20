@@ -79,7 +79,7 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
         }
 
         files_to_process.push(FileMeta {
-            path: path.into(),
+            path: path,
             rel_norm: PathBuf::from(rel_norm_string.into_string()).into(),
             meta: metadata,
         });
@@ -178,6 +178,7 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
 //
 //
 
+#[must_use] 
 pub fn classify_patterns(
     patterns:      &[PathBuf],
     current_dir:   &Path,
@@ -223,8 +224,9 @@ pub fn classify_patterns(
     (literal_roots, combined_re)
 }
 
-/// Walk repo, returning (abs_path, rel_norm_string) for every non-ignored file
-/// that matches literal_roots or combined_re.
+/// Walk repo, returning (`abs_path`, `rel_norm_string`) for every non-ignored file
+/// that matches `literal_roots` or `combined_re`.
+#[must_use] 
 pub fn walk_matching(
     repo_root:    &Path,
     ignore:       &Ignore,

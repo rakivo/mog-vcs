@@ -203,8 +203,8 @@ fn collect_status(
 
     let index_results = (0..index.count).into_par_iter().map(|i| {
         let path_str = index.get_path(i);
-        let abs = repo_root.join(&path_str);
-        let head_hash = head.lookup(&path_str);
+        let abs = repo_root.join(path_str);
+        let head_hash = head.lookup(path_str);
         let index_hash = index.hashes[i];
 
         let staged = head_hash != Some(index_hash);
@@ -249,7 +249,7 @@ fn collect_status(
     let mut staged_deleted = Vec::new();
     for j in 0..head.len() {
         let path_str = head.get_path(head.sorted_order[j]);
-        if index.find(&path_str).is_none() {
+        if index.find(path_str).is_none() {
             staged_deleted.push(path_str.into());
         }
     }

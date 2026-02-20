@@ -8,12 +8,12 @@ use crate::tree::TreeEntry;
 use crate::util::Xxh3HashSet;
 
 use std::ops::{Deref, DerefMut};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Result, bail};
 
 pub struct Repository {
-    pub root: PathBuf,
+    pub root: Box<Path>,
     pub storage: Storage,
     pub ignore: Ignore,
     pub object_cache: EncodedCache,
@@ -37,7 +37,6 @@ impl Repository {
         let mog_dir = path.join(".mog");
 
         std::fs::create_dir_all(&mog_dir)?;
-        std::fs::create_dir_all(mog_dir.join("objects"))?;
         std::fs::create_dir_all(mog_dir.join("refs/heads"))?;
         std::fs::create_dir_all(mog_dir.join("refs/remotes"))?;
 
@@ -46,7 +45,7 @@ impl Repository {
             b"ref: refs/heads/main\n"
         )?;
 
-        let root = path.canonicalize()?;
+        let root = path.canonicalize()?.into_boxed_path();
         let mogged = root.join(".mogged");
         if !mogged.exists() {
             std::fs::write(
@@ -75,14 +74,15 @@ target/\n\
     }
 
     #[inline]
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
         let mog_dir = path.join(".mog");
 
         if !mog_dir.exists() {
             bail!("not a mog repository");
         }
 
-        let root = path.canonicalize()?;
+        let root = path.canonicalize()?.into_boxed_path();
         Ok(Self {
             ignore: Ignore::load(&root)?,
             root,
@@ -92,7 +92,6 @@ target/\n\
         })
     }
 
-    /// Read object by hash; decode into stores and return Object(id). Uses 1MB encoded-bytes cache.
     #[inline]
     pub fn read_object(&mut self, hash: &Hash) -> Result<Object> {
         if let Some(cached) = self.object_cache.get(hash) {
@@ -244,11 +243,11 @@ target/\n\
         let obj = self.read_object(tree_hash)?;
         let mut current_id = obj.try_as_tree_id()?;
 
-        let components: Vec<&str> = path
+        let components = path
             .trim_matches('/')
             .split('/')
             .filter(|s| !s.is_empty())
-            .collect();
+            .collect::<Vec<_>>();
 
         if components.is_empty() {
             bail!("empty path");
@@ -258,6 +257,7 @@ target/\n\
             let hash = self.tree
                 .find_entry(current_id, component)
                 .ok_or_else(|| anyhow::anyhow!("path not found: '{component}'"))?;
+
             let obj = self.read_object(&hash)?;
             current_id = obj.try_as_tree_id()?;
         }

@@ -23,6 +23,7 @@ pub struct TreeEntryRef<'a> {
 
 impl TreeEntryRef<'_> {
     #[inline]
+    #[must_use] 
     pub fn into_entry(self) -> TreeEntry {
         TreeEntry {
             name: self.name.into(),
@@ -32,9 +33,9 @@ impl TreeEntryRef<'_> {
     }
 }
 
-impl Into<TreeEntry> for TreeEntryRef<'_> {
-    fn into(self) -> TreeEntry {
-        self.into_entry()
+impl From<TreeEntryRef<'_>> for TreeEntry {
+    fn from(val: TreeEntryRef<'_>) -> Self {
+        val.into_entry()
     }
 }
 
@@ -189,7 +190,7 @@ impl Tree {
     // Find a named entry in a tree, returning its hash
     #[inline]
     #[must_use]
-    pub fn find_in_tree<'a>(&'a self, name: &str) -> Option<Hash> {
+    pub fn find_in_tree(&self, name: &str) -> Option<Hash> {
         self.into_iter()
             .find(|entry| entry.name == name)
             .map(|entry| entry.hash)

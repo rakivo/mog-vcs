@@ -167,7 +167,7 @@ impl TreeStore {
         let start = self.name_start[idx] as usize;
         let end = start + self.name_len[idx] as usize;
         let name = str_from_utf8_data_shouldve_been_valid_or_we_got_hacked(&self.names_blob[start..end]);
-        TreeEntryRef { hash, mode, name }
+        TreeEntryRef { hash, name, mode }
     }
 
     #[inline]
@@ -201,10 +201,10 @@ pub struct CommitStore {
 
     pub timestamp: Vec<i64>,
 
-    pub author_start: Vec<u32>, // Into strings
+    pub author_start: Vec<u32>, // Into `strings`
     pub author_len: Vec<u32>,
 
-    pub message_start: Vec<u32>, // Into strings
+    pub message_start: Vec<u32>, // Into `strings`
     pub message_len: Vec<u32>,
 
     pub strings: Vec<u8>,

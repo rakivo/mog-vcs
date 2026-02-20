@@ -89,32 +89,32 @@ fn main() -> Result<()> {
         }
 
         Commands::HashObject { write, file } => {
-            let mut repo = Repository::open(&PathBuf::from("."))?;
+            let mut repo = Repository::open(".")?;
             mog::hash_object::hash_object(&mut repo, &file, write)?;
         }
 
         Commands::CatFile { hash } => {
-            let mut repo = Repository::open(&PathBuf::from("."))?;
+            let mut repo = Repository::open(".")?;
             let mut buf = String::new();
             mog::cat_file::cat_file(&mut repo, &hash, &mut buf)?;
             println!("{buf}");
         }
 
         Commands::WriteTree => {
-            let mut repo = Repository::open(&PathBuf::from("."))?;
-            let hash = mog::write_tree::write_tree(&mut repo, &PathBuf::from("."))?;
+            let mut repo = Repository::open(".")?;
+            let hash = mog::write_tree::write_tree(&mut repo, ".")?;
             println!("{}", mog::hash::hash_to_hex(&hash));
         }
 
         Commands::Log => {
-            let mut repo = Repository::open(&PathBuf::from("."))?;
+            let mut repo = Repository::open(".")?;
             let mut buf = String::new();
             mog::log::log(&mut repo, &mut buf)?;
             print!("{buf}");
         }
 
         Commands::Checkout { branch, path, new_branch } => {
-            let mut repo = Repository::open(&PathBuf::from("."))?;
+            let mut repo = Repository::open(".")?;
             if new_branch {
                 mog::branch::create(&mut repo, &branch, None)?;
                 mog::checkout::checkout(&mut repo, &branch)?;
@@ -127,7 +127,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Branch { name, at, delete, force_delete, rename_to } => {
-            let mut repo = Repository::open(&PathBuf::from("."))?;
+            let mut repo = Repository::open(".")?;
 
             if let Some(branch) = delete {
                 mog::branch::delete(&mut repo, &branch)?;
@@ -143,22 +143,22 @@ fn main() -> Result<()> {
         }
 
         Commands::Add { files } => {
-            let mut repo = Repository::open(&PathBuf::from("."))?;
+            let mut repo = Repository::open(".")?;
             mog::add::add(&mut repo, &files)?;
         }
 
         Commands::Remove { files } => {
-            let mut repo = Repository::open(&PathBuf::from("."))?;
+            let mut repo = Repository::open(".")?;
             mog::remove::remove(&mut repo, &files)?;
         }
 
         Commands::Status => {
-            let mut repo = Repository::open(&PathBuf::from("."))?;
+            let mut repo = Repository::open(".")?;
             mog::status::status(&mut repo)?;
         }
 
         Commands::Commit { message, author } => {
-            let mut repo = Repository::open(&PathBuf::from("."))?;
+            let mut repo = Repository::open(".")?;
             let index = mog::index::Index::load(&repo.root)?;
             if index.count == 0 {
                 eprintln!("nothing staged to commit (use 'mog add <file>'...)");
