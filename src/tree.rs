@@ -1,5 +1,6 @@
 use crate::hash::Hash;
 use crate::store::{TreeId, TreeStore};
+use crate::util::str_from_utf8_data_shouldve_been_valid_or_we_got_hacked;
 use crate::wire::{Decode, Encode, ReadCursor, WriteCursor};
 
 use anyhow::Result;
@@ -9,6 +10,32 @@ pub struct TreeEntry {
     pub mode: u32,
     pub hash: Hash,
     pub name: Box<str>,
+}
+
+#[derive(Debug)]
+pub struct TreeEntryRef<'a> {
+    // align 8
+    pub hash: Hash,
+    pub name: &'a str,
+
+    pub mode: u32,
+}
+
+impl TreeEntryRef<'_> {
+    #[inline]
+    pub fn into_entry(self) -> TreeEntry {
+        TreeEntry {
+            name: self.name.into(),
+            hash: self.hash,
+            mode: self.mode
+        }
+    }
+}
+
+impl Into<TreeEntry> for TreeEntryRef<'_> {
+    fn into(self) -> TreeEntry {
+        self.into_entry()
+    }
 }
 
 crate::payload_triple! {
@@ -36,6 +63,7 @@ crate::payload_triple! {
 }
 
 impl TreePayloadOwned {
+    #[must_use]
     pub fn new(entries: Box<[TreeEntry]>) -> Self {
         Self { entries }
     }
@@ -62,7 +90,7 @@ impl Decode for TreePayloadOwned {
         for i in 0..count {
             let start = name_offsets[i];
             let end = if i + 1 < count { name_offsets[i + 1] } else { names_len };
-            let name = std::str::from_utf8(&names_blob[start..end])?;
+            let name = str_from_utf8_data_shouldve_been_valid_or_we_got_hacked(&names_blob[start..end]);
             entries.push(TreeEntry {
                 mode: modes[i],
                 hash: hashes[i],
@@ -74,6 +102,7 @@ impl Decode for TreePayloadOwned {
 }
 
 impl<'a> TreePayloadRef<'a> {
+    #[must_use]
     pub fn new(store: &'a TreeStore, id: TreeId) -> Self {
         Self { store, id }
     }

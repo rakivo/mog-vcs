@@ -5,7 +5,7 @@ use crate::object::Object;
 use crate::store::TreeId;
 use crate::tree::TreeEntry;
 use crate::tracy;
-use crate::util::Xxh3HashMap;
+use crate::util::{str_from_utf8_data_shouldve_been_valid_or_we_got_hacked, Xxh3HashMap};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,7 +14,7 @@ use std::fs;
 use anyhow::{Result, bail};
 use xxhash_rust::xxh3::xxh3_64;
 
-const INDEX_MAGIC: &[u8; 4] = b"VXIX";
+const INDEX_MAGIC: &[u8; 4] = b"MOGG";
 const INDEX_VERSION: u32 = 1;
 
 // On-disk binary layout:
@@ -63,6 +63,15 @@ pub struct IndexEntryRef<'a> {
     pub mode:  u32,
 }
 
+impl<'a> IntoIterator for &'a Index {
+    type Item = IndexEntryRef<'a>;
+    type IntoIter = IndexIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 pub struct IndexIter<'index> {
     mog_index: &'index Index,
     index: usize,
@@ -95,7 +104,7 @@ impl Index {
     pub fn load(repo_root: &Path) -> Result<Self> {
         let _span = tracy::span!("Index::load");
 
-        let path = repo_root.join(".vx/index");
+        let path = repo_root.join(".mog/index");
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -108,8 +117,9 @@ impl Index {
     pub fn save(&self, repo_root: &Path) -> Result<()> {
         let _span = tracy::span!("Index::save");
 
-        let path = repo_root.join(".vx/index");
+        let path = repo_root.join(".mog/index");
         fs::write(path, self.encode())?;
+
         Ok(())
     }
 
@@ -159,7 +169,7 @@ impl Index {
         //
 
         if &data[0..4] != INDEX_MAGIC {
-            bail!("invalid index magic, expected VXIX");
+            bail!("invalid index magic, expected MOGIX");
         }
 
         let version = u32::from_le_bytes(data[4..8].try_into()?);
@@ -170,7 +180,6 @@ impl Index {
         let count = u32::from_le_bytes(data[8..MINIMAL_HEADER_SIZE_IN_BYTES].try_into()?) as usize;
         let mut cur = MINIMAL_HEADER_SIZE_IN_BYTES;
 
-        // Helper macro to read a fixed-size field and advance cursor
         macro_rules! read_u32 {
             () => {{
                 let v = u32::from_le_bytes(data[cur..cur+4].try_into()?);
@@ -250,6 +259,7 @@ impl Index {
         xxh3_64(path.as_bytes())
     }
 
+    #[inline]
     fn build_path_index(&mut self) {
         self.path_index.clear();
         self.path_index.reserve(self.count);
@@ -259,8 +269,8 @@ impl Index {
         }
     }
 
-    // Get path string for entry i
     #[inline]
+    #[must_use]
     pub fn get_path_impl<'a>(count: usize, path_offsets: &[u32], paths_blob: &'a [u8], i: usize) -> &'a str {
         let start = path_offsets[i] as usize;
         let end = if i + 1 < count {
@@ -268,27 +278,29 @@ impl Index {
         } else {
             paths_blob.len()
         };
-        std::str::from_utf8(&paths_blob[start..end]).expect("invalid utf8 in index path")
+
+        str_from_utf8_data_shouldve_been_valid_or_we_got_hacked(&paths_blob[start..end])
     }
 
-    // Get path string for entry i
     #[inline]
+    #[must_use]
     pub fn get_path(&self, i: usize) -> &str {
         Self::get_path_impl(self.count, &self.path_offsets, &self.paths_blob, i)
     }
 
     #[inline]
-    pub fn find(&self, path: &Path) -> Option<usize> {
-        let path_str = path.to_str()?;
+    #[must_use]
+    pub fn find(&self, path: impl AsRef<str>) -> Option<usize> {
+        let path_str = path.as_ref();
         let h = Self::path_hash(path_str);
         let list = self.path_index.get(&h)?;
         list.iter().copied().find(|&i| self.get_path(i) == path_str)
     }
 
-    pub fn add(&mut self, path: &Path, hash: Hash, meta: &fs::Metadata) {
+    pub fn add(&mut self, path: impl AsRef<str>, hash: Hash, meta: &fs::Metadata) {
         let _span = tracy::span!("Index::add");
 
-        let path_str = path.to_str().expect("non-utf8 path");
+        let path_str = path.as_ref();
 
         let mtime = meta
             .modified()
@@ -321,8 +333,8 @@ impl Index {
         self.count += 1;
     }
 
-    pub fn remove(&mut self, path: &Path) -> bool {
-        let path_str = path.to_str().expect("non-utf8 path");
+    pub fn remove(&mut self, path: impl AsRef<str>) -> bool {
+        let path_str = path.as_ref();
         let h = Self::path_hash(path_str);
         let (pos, i) = match self.path_index.get(&h) {
             Some(list) => {
@@ -351,9 +363,11 @@ impl Index {
         self.count -= 1;
         let list = self.path_index.get_mut(&h).unwrap();
         list.remove(pos);
+
         if list.is_empty() {
             self.path_index.remove(&h);
         }
+
         for list in self.path_index.values_mut() {
             for idx in list.iter_mut() {
                 if *idx > i {
@@ -361,6 +375,7 @@ impl Index {
                 }
             }
         }
+
         true
     }
 
@@ -372,28 +387,30 @@ impl Index {
         tree_id: TreeId,
         prefix: &str,
     ) -> Result<()> {
-        let n = repo.tree_store.entry_count(tree_id);
+        let n = repo.tree.entry_count(tree_id);
         for j in 0..n {
-            let TreeEntry { hash, name, .. } = repo.tree_store.get_entry(tree_id, j);
+            let TreeEntry { hash, name, .. } = repo.tree.get_entry(tree_id, j);
 
-            let obj = repo.read_object(&hash)?;
-            match obj {
+            let object = repo.read_object(&hash)?;
+            match object {
                 Object::Blob(_) => {
                     if prefix.is_empty() {
                         let abs = repo.root.join(name.as_ref());
                         let metadata = fs::metadata(&abs)?;
-                        let name_path: &Path = name.as_ref().as_ref();
-                        self.add(name_path, hash, &metadata);
+                        self.add(name, hash, &metadata);
                     } else {
                         let mut path = String::with_capacity(prefix.len() + 1 + name.len());
                         path.push_str(prefix);
                         path.push('/');
                         path.push_str(&name);
+
                         let abs = repo.root.join(&path);
                         let metadata = fs::metadata(&abs)?;
-                        self.add(path.as_ref(), hash, &metadata);
+
+                        self.add(&path, hash, &metadata);
                     }
                 }
+
                 Object::Tree(sub_id) => {
                     let path = if prefix.is_empty() {
                         name
@@ -404,8 +421,10 @@ impl Index {
                         path.push_str(&name);
                         path.into()
                     };
+
                     self.update_from_tree_recursive(repo, sub_id, &path)?;
                 }
+
                 Object::Commit(_) => {}
             }
         }
@@ -415,6 +434,8 @@ impl Index {
 
     // Fast dirty check: compare mtime + size before hashing.
     // Returns true if the file MIGHT be modified (triggers full hash check).
+    #[inline]
+    #[must_use]
     pub fn is_dirty(&self, i: usize, metadata: &fs::Metadata) -> bool {
         let _span = tracy::span!("Index::is_dirty");
 
@@ -429,6 +450,7 @@ impl Index {
     }
 
     #[inline]
+    #[must_use]
     pub fn iter(&self) -> IndexIter<'_> {
         IndexIter { mog_index: self, index: 0 }
     }
@@ -466,7 +488,7 @@ impl Index {
 // Builds a tree for `dir` by consuming a contiguous slice of sorted entries.
 // Returns (tree_hash, how_many_entries_consumed).
 //
-// This is a hot path for `vx commit` and is intentionally implemented without recursion.
+// This is a hot path for `mog commit` and is intentionally implemented without recursion.
 fn build_tree(
     repo: &mut Repository,
     paths:  &[&str],
@@ -514,7 +536,7 @@ fn build_tree(
         if finish_now {
             let done = stack.pop().expect("non-empty stack");
 
-            let tree_id = repo.tree_store.extend(&done.tree_entries_buffer);
+            let tree_id = repo.tree.extend(&done.tree_entries_buffer);
             let hash = repo.write_object(Object::Tree(tree_id));
             let consumed = i - done.start;
 

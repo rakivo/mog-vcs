@@ -8,7 +8,7 @@ use crate::{
 
 #[inline]
 fn branch_path(repo: &Repository, name: &str) -> PathBuf {
-    repo.root.join(".vx/refs/heads").join(name)
+    repo.root.join(".mog/refs/heads").join(name)
 }
 
 #[inline]
@@ -18,7 +18,7 @@ fn branch_exists(repo: &Repository, name: &str) -> bool {
 
 /// Print all local branches, marking the current one with *.
 pub fn list(repo: &Repository) -> Result<()> {
-    let heads_dir = repo.root.join(".vx/refs/heads");
+    let heads_dir = repo.root.join(".mog/refs/heads");
     if !heads_dir.exists() {
         println!("no branches yet");
         return Ok(());
@@ -31,7 +31,7 @@ pub fn list(repo: &Repository) -> Result<()> {
         .filter_map(|e| e.file_name().into_string().ok())
         .collect::<Vec<_>>();
 
-    branches.sort();
+    branches.sort_unstable();
 
     for branch in branches {
         let marker = if current.as_deref() == Some(&branch) { "* " } else { "  " };
@@ -57,7 +57,7 @@ pub fn create(repo: &mut Repository, name: &str, target: Option<&str>) -> Result
     let hash = match target {
         Some(t) => {
             let branch_ref = format!("refs/heads/{t}");
-            let branch_path = repo.root.join(".vx").join(&branch_ref);
+            let branch_path = repo.root.join(".mog").join(&branch_ref);
             if branch_path.exists() {
                 repo.read_ref(&branch_ref)?
             } else {
@@ -91,7 +91,7 @@ pub fn delete(repo: &mut Repository, name: &str) -> Result<()> {
     //
     // Check if branch_hash is reachable from any OTHER branch
     //
-    let heads_dir = repo.root.join(".vx/refs/heads");
+    let heads_dir = repo.root.join(".mog/refs/heads");
     let other_heads = std::fs::read_dir(&heads_dir)?
         .filter_map(Result::ok)
         .filter_map(|e| e.file_name().into_string().ok())
@@ -106,7 +106,7 @@ pub fn delete(repo: &mut Repository, name: &str) -> Result<()> {
     if !other_reachable.contains(&branch_hash) {
         bail!(
             "branch '{name}' has commits that are not merged into any other branch.\n\
-             use 'vx branch -D {name}' to force delete."
+             use 'mog branch -D {name}' to force delete."
         );
     }
 
@@ -151,7 +151,7 @@ pub fn rename(repo: &Repository, old: &str, new: &str) -> Result<()> {
     //
     if repo.current_branch()?.as_deref() == Some(old) {
         std::fs::write(
-            repo.root.join(".vx/HEAD"),
+            repo.root.join(".mog/HEAD"),
             format!("ref: refs/heads/{new}\n"),
         )?;
     }

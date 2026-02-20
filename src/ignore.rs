@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::tracy;
+
 /// Data-oriented ignore matcher loaded from `.mogged`.
 ///
 /// Rules are repo-root-relative and use `/` separators.
@@ -22,9 +24,9 @@ impl Ignore {
         let mut globs: Vec<SimpleGlob> = Vec::new();
 
         // Builtins: always ignore VCS metadata + our own store.
-        prefixes.push(b".vx/".to_vec());
+        prefixes.push(b".mog/".to_vec());
         prefixes.push(b".git/".to_vec());
-        exact.push(b".vx".to_vec());
+        exact.push(b".mog".to_vec());
         exact.push(b".git".to_vec());
 
         let path = root.join(".mogged");
@@ -64,9 +66,9 @@ impl Ignore {
             }
         }
 
-        exact.sort();
+        exact.sort_unstable();
         exact.dedup();
-        prefixes.sort();
+        prefixes.sort_unstable();
         prefixes.dedup();
 
         Ok(Self {
@@ -78,6 +80,7 @@ impl Ignore {
     }
 
     #[inline]
+    #[must_use]
     pub fn is_ignored_abs(&self, abs: &Path) -> bool {
         let Ok(rel) = abs.strip_prefix(&self.root) else { return false };
         if rel.as_os_str().is_empty() {
@@ -87,7 +90,10 @@ impl Ignore {
         self.is_ignored_rel(&rel_str)
     }
 
+    #[must_use]
     pub fn is_ignored_rel(&self, rel: &str) -> bool {
+        let _span = tracy::span!("Ignore::is_ignored_rel");
+
         let rel = rel.trim_start_matches('/');
         if rel.is_empty() {
             return false;
@@ -122,10 +128,12 @@ pub struct SimpleGlob {
 }
 
 impl SimpleGlob {
+    #[must_use]
     pub fn new(pat: &str) -> Self {
         Self { pat: pat.as_bytes().to_vec() }
     }
 
+    #[must_use]
     pub fn is_match(&self, text: &[u8]) -> bool {
         let pat = &self.pat;
 

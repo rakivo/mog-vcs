@@ -13,14 +13,14 @@ pub fn checkout_blob_to(repo: &Repository, blob_id: BlobId, to: &str) -> Result<
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let data = repo.blob_store.get(blob_id);
+    let data = repo.blob.get(blob_id);
     std::fs::write(&path, data)?;
     Ok(())
 }
 
 #[inline]
 pub fn checkout_commit(repo: &mut Repository, commit_id: CommitId) -> Result<()> {
-    let tree_hash = repo.commit_store.get_tree(commit_id);
+    let tree_hash = repo.commit.get_tree(commit_id);
     let obj = repo.read_object(&tree_hash)?;
     let tree_id = obj.try_as_tree_id()?;
     checkout_tree(repo, tree_id)
@@ -36,9 +36,9 @@ pub fn checkout_tree_impl(
     tree_id: TreeId,
     tree_path: Option<&str>,
 ) -> Result<()> {
-    let n = repo.tree_store.entry_count(tree_id);
+    let n = repo.tree.entry_count(tree_id);
     for j in 0..n {
-        let TreeEntry { hash, name, .. } = repo.tree_store.get_entry(tree_id, j);
+        let TreeEntry { hash, name, .. } = repo.tree.get_entry(tree_id, j);
         let obj = repo.read_object(&hash)?;
 
         let full_path = if let Some(tp) = tree_path {
@@ -58,7 +58,7 @@ pub fn checkout_tree_impl(
 
 pub fn checkout(repo: &mut Repository, branch: &str) -> Result<()> {
     let branch_ref = format!("refs/heads/{branch}");
-    let branch_path = repo.root.join(".vx").join(&branch_ref);
+    let branch_path = repo.root.join(".mog").join(&branch_ref);
 
     if branch_path.exists() {
         let hash = repo.read_ref(&branch_ref)?;
@@ -66,7 +66,7 @@ pub fn checkout(repo: &mut Repository, branch: &str) -> Result<()> {
         let commit_id = obj.try_as_commit_id()?;
 
         std::fs::write(
-            repo.root.join(".vx/HEAD"),
+            repo.root.join(".mog/HEAD"),
             format!("ref: {branch_ref}\n"),
         )?;
 
@@ -79,21 +79,21 @@ pub fn checkout(repo: &mut Repository, branch: &str) -> Result<()> {
     checkout_commit(repo, obj.try_as_commit_id()?)?;
 
     std::fs::write(
-        repo.root.join(".vx/HEAD"),
+        repo.root.join(".mog/HEAD"),
         format!("{hash}\n", hash = hash_to_hex(&hash)),
     )?;
 
     println!("HEAD is now at {} (detached)", &hash_to_hex(&hash)[..8]);
     println!("You are in detached HEAD state.");
     println!("If you commit, create a branch to keep your work:");
-    println!("  vx branch save-my-work");
+    println!("  mog branch save-my-work");
 
     Ok(())
 }
 
 pub fn checkout_path(repo: &mut Repository, target: &str, path: &str) -> Result<()> {
     let (_commit_hash, commit_id) = repo.resolve_to_commit(target)?;
-    let tree_hash = repo.commit_store.get_tree(commit_id);
+    let tree_hash = repo.commit.get_tree(commit_id);
     let (obj, obj_hash) = repo.walk_tree_path(&tree_hash, path)?;
 
     let mut index = Index::load(&repo.root)?;
@@ -103,7 +103,7 @@ pub fn checkout_path(repo: &mut Repository, target: &str, path: &str) -> Result<
             checkout_blob_to(repo, blob_id, path)?;
             let abs = repo.root.join(path);
             let metadata = std::fs::metadata(&abs)?;
-            index.add(path.as_ref(), obj_hash, &metadata);
+            index.add(path, obj_hash, &metadata);
             index.save(&repo.root)?;
             println!("restored '{path}'");
         }

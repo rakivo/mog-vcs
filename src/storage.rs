@@ -151,6 +151,7 @@ impl Storage {
     }
 
     #[inline]
+    #[must_use] 
     pub fn exists(&self, hash: &Hash) -> bool {
         let _span = tracy::span!("Storage::exists");
 

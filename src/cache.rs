@@ -24,6 +24,7 @@ impl Default for EncodedCache {
 impl EncodedCache {
     /// Get encoded bytes by hash, if present. Reference is valid until the next mutating call.
     #[inline]
+    #[must_use] 
     pub fn get(&self, hash: &Hash) -> Option<&[u8]> {
         self.entries
             .iter()

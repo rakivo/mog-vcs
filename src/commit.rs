@@ -19,11 +19,11 @@ pub fn commit(
         .as_secs() as i64;
 
     let parents: Vec<Hash> = parent.into_iter().collect();
-    let commit_id = repo.commit_store.push(tree, &parents, timestamp, author, message);
+    let commit_id = repo.commit.push(tree, &parents, timestamp, author, message);
     let hash = repo.write_object(Object::Commit(commit_id));
 
     // Read HEAD to figure out where to write
-    let head = fs::read_to_string(repo.root.join(".vx/HEAD"))?;
+    let head = fs::read_to_string(repo.root.join(".mog/HEAD"))?;
     let head = head.trim();
 
     if let Some(refpath) = head.strip_prefix("ref: ") {
@@ -32,11 +32,11 @@ pub fn commit(
     } else {
         // Detached HEAD: update HEAD directly to new commit
         fs::write(
-            repo.root.join(".vx/HEAD"),
+            repo.root.join(".mog/HEAD"),
             format!("{}\n", hash_to_hex(&hash))
         )?;
         println!("Warning: committing in detached HEAD state");
-        println!("Create a branch to keep this work: vx branch save-my-work");
+        println!("Create a branch to keep this work: mog branch save-my-work");
     }
 
     println!("Created commit {}", hash_to_hex(&hash));
@@ -86,6 +86,7 @@ crate::payload_triple! {
 }
 
 impl CommitPayloadOwned {
+    #[must_use]
     pub fn new(tree: Hash, parents: Box<[Hash]>, timestamp: i64, author: Box<str>, message: Box<str>) -> Self {
         Self {
             tree,
@@ -119,6 +120,7 @@ impl Decode for CommitPayloadOwned {
 }
 
 impl<'a> CommitPayloadRef<'a> {
+    #[must_use]
     pub fn new(store: &'a CommitStore, id: CommitId) -> Self {
         Self { store, id }
     }

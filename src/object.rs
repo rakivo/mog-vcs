@@ -1,4 +1,4 @@
-use crate::{hash::Hash, store::{BlobId, CommitId, TreeId}};
+use crate::{hash::Hash, store::{BlobId, CommitId, TreeId}, tree::TreeEntryRef, util::str_from_utf8_data_shouldve_been_valid_or_we_got_hacked};
 
 use anyhow::{bail, Result};
 
@@ -54,6 +54,7 @@ pub enum ObjectTag {
 
 impl ObjectTag {
     #[inline]
+    #[must_use]
     pub fn from_byte(b: u8) -> Option<Self> {
         match b {
             0x1 => Some(Self::Blob),
@@ -64,6 +65,7 @@ impl ObjectTag {
     }
 
     #[inline]
+    #[must_use]
     pub fn as_byte(self) -> u8 {
         self as u8
     }
@@ -80,6 +82,19 @@ pub fn encode_blob_into(data: &[u8], buf: &mut Vec<u8>) {
     buf.extend_from_slice(data);
 }
 
+/// Encode raw bytes as on-disk blob (VX01 + type + len + data).
+#[inline]
+pub fn hash_blob(data: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+
+    hasher.update(b"VX01");
+    hasher.update(&[ObjectTag::Blob.as_byte()]);
+    hasher.update(&(data.len() as u64).to_le_bytes());
+    hasher.update(data);
+
+    hasher.finalize().into()
+}
+
 #[derive(Debug, Clone)]
 pub struct Tree {
     pub modes:        Box<[u32]>,
@@ -93,15 +108,6 @@ pub struct TreeIterator<'tree> {
     pub index: usize
 }
 
-#[derive(Debug)]
-pub struct TreeEntryRef<'tree> {
-    // align 8
-    pub hash: &'tree Hash,
-    pub name: &'tree str,
-
-    pub mode: u32,
-}
-
 impl<'tree> Iterator for TreeIterator<'tree> {
     type Item = TreeEntryRef<'tree>;
 
@@ -112,7 +118,7 @@ impl<'tree> Iterator for TreeIterator<'tree> {
 
         let e = TreeEntryRef {
             mode: self.tree.modes[self.index],
-            hash: &self.tree.hashes[self.index],
+            hash: self.tree.hashes[self.index],
             name: self.tree.get_name(self.index)
         };
 
@@ -133,24 +139,28 @@ impl<'tree> IntoIterator for &'tree Tree {
 
 impl Tree {
     #[inline]
+    #[must_use]
     pub fn iter(&self) -> TreeIterator<'_> {
         TreeIterator { tree: self, index: 0 }
     }
 
     #[inline]
+    #[must_use]
     pub fn count(&self) -> usize {
         self.modes.len()
     }
 
     // Find a named entry in a tree, returning its hash
     #[inline]
-    pub fn find_in_tree<'a>(&'a self, name: &str) -> Option<&'a Hash> {
+    #[must_use]
+    pub fn find_in_tree<'a>(&'a self, name: &str) -> Option<Hash> {
         self.into_iter()
             .find(|entry| entry.name == name)
             .map(|entry| entry.hash)
     }
 
     #[inline]
+    #[must_use]
     pub fn get_name(&self, index: usize) -> &str {
         let start = self.name_offsets[index] as usize;
         let end = if index + 1 < self.count() {
@@ -159,7 +169,6 @@ impl Tree {
             self.names_blob.len()
         };
 
-        std::str::from_utf8(&self.names_blob[start..end])
-            .expect("invalid utf8 in tree name")
+        str_from_utf8_data_shouldve_been_valid_or_we_got_hacked(&self.names_blob[start..end])
     }
 }

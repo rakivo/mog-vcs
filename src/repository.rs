@@ -2,10 +2,11 @@ use crate::cache::EncodedCache;
 use crate::ignore::Ignore;
 use crate::storage::Storage;
 use crate::object::Object;
-use crate::store::{decode_into_stores, encode_object_into, object_hash, BlobStore, CommitId, CommitStore, TreeStore};
+use crate::store::{decode_object_into_stores, encode_object_into, object_hash, CommitId, Stores};
 use crate::hash::{Hash, hash_to_hex, hex_to_hash};
 use crate::util::Xxh3HashSet;
 
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
@@ -15,23 +16,30 @@ pub struct Repository {
     pub storage: Storage,
     pub ignore: Ignore,
     pub object_cache: EncodedCache,
-    pub blob_store: BlobStore,
-    pub tree_store: TreeStore,
-    pub commit_store: CommitStore,
+    pub stores: Stores
+}
+
+impl Deref for Repository {
+    type Target = Stores;
+    fn deref(&self) -> &Self::Target { &self.stores }
+}
+
+impl DerefMut for Repository {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.stores }
 }
 
 impl Repository {
     #[inline]
     pub fn init(path: &Path) -> Result<Self> {
-        let vx_dir = path.join(".vx");
+        let mog_dir = path.join(".mog");
 
-        std::fs::create_dir_all(&vx_dir)?;
-        std::fs::create_dir_all(vx_dir.join("objects"))?;
-        std::fs::create_dir_all(vx_dir.join("refs/heads"))?;
-        std::fs::create_dir_all(vx_dir.join("refs/remotes"))?;
+        std::fs::create_dir_all(&mog_dir)?;
+        std::fs::create_dir_all(mog_dir.join("objects"))?;
+        std::fs::create_dir_all(mog_dir.join("refs/heads"))?;
+        std::fs::create_dir_all(mog_dir.join("refs/remotes"))?;
 
         std::fs::write(
-            vx_dir.join("HEAD"),
+            mog_dir.join("HEAD"),
             b"ref: refs/heads/main\n"
         )?;
 
@@ -44,7 +52,7 @@ impl Repository {
 # Lines ending with / ignore a directory prefix.\n\
 # * and ? are supported.\n\
 \n\
-.vx/\n\
+.mog/\n\
 .git/\n\
 target/\n\
 .idea/\n\
@@ -56,61 +64,55 @@ target/\n\
         Ok(Self {
             ignore: Ignore::load(&root)?,
             root,
-            storage: Storage::new(&vx_dir)?,
+            storage: Storage::new(&mog_dir)?,
             object_cache: EncodedCache::default(),
-            blob_store: BlobStore::default(),
-            tree_store: TreeStore::default(),
-            commit_store: CommitStore::default(),
+            stores: Stores::default(),
         })
     }
 
     #[inline]
     pub fn open(path: &Path) -> Result<Self> {
-        let vx_dir = path.join(".vx");
+        let mog_dir = path.join(".mog");
 
-        if !vx_dir.exists() {
-            bail!("not a vx repository");
+        if !mog_dir.exists() {
+            bail!("not a mog repository");
         }
 
         let root = path.canonicalize()?;
         Ok(Self {
             ignore: Ignore::load(&root)?,
             root,
-            storage: Storage::new(&vx_dir)?,
+            storage: Storage::new(&mog_dir)?,
             object_cache: EncodedCache::default(),
-            blob_store: BlobStore::default(),
-            tree_store: TreeStore::default(),
-            commit_store: CommitStore::default(),
+            stores: Stores::default()
         })
     }
 
     /// Read object by hash; decode into stores and return Object(id). Uses 1MB encoded-bytes cache.
+    #[inline]
     pub fn read_object(&mut self, hash: &Hash) -> Result<Object> {
         if let Some(cached) = self.object_cache.get(hash) {
-            return decode_into_stores(
+            return decode_object_into_stores(
                 cached,
-                &mut self.blob_store,
-                &mut self.tree_store,
-                &mut self.commit_store,
+                &mut self.stores,
             );
         }
         let data = self.storage.read(hash)?;
-        let obj = decode_into_stores(
+        let obj = decode_object_into_stores(
             &data,
-            &mut self.blob_store,
-            &mut self.tree_store,
-            &mut self.commit_store,
+            &mut self.stores
         )?;
         self.object_cache.insert(*hash, data);
         Ok(obj)
     }
 
     /// Encode from stores, hash, push to storage. Returns hash.
-    pub fn write_object(&mut self, obj: Object) -> Hash {
-        let hash = object_hash(obj, &self.blob_store, &self.tree_store, &self.commit_store);
+    #[inline]
+    pub fn write_object(&mut self, object: Object) -> Hash {
+        let hash = object_hash(object, &self.stores);
 
         let mut buf = Vec::new();
-        encode_object_into(obj, &self.blob_store, &self.tree_store, &self.commit_store, &mut buf);
+        encode_object_into(object, &self.stores, &mut buf);
 
         self.storage.write(hash, buf);
 
@@ -119,14 +121,14 @@ target/\n\
 
     #[inline]
     pub fn read_ref(&self, refname: &str) -> Result<Hash> {
-        let path = self.root.join(".vx").join(refname);
+        let path = self.root.join(".mog").join(refname);
         let content = std::fs::read_to_string(path)?;
         hex_to_hash(content.trim())
     }
 
     #[inline]
     pub fn write_ref(&self, refname: &str, hash: &Hash) -> Result<()> {
-        let path = self.root.join(".vx").join(refname);
+        let path = self.root.join(".mog").join(refname);
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -140,7 +142,7 @@ target/\n\
     /// whether HEAD is a branch ref or detached
     #[inline]
     pub fn read_head_commit(&self) -> Result<Hash> {
-        let head = std::fs::read_to_string(self.root.join(".vx/HEAD"))?;
+        let head = std::fs::read_to_string(self.root.join(".mog/HEAD"))?;
         let head = head.trim();
 
         if let Some(refpath) = head.strip_prefix("ref: ") {
@@ -155,7 +157,7 @@ target/\n\
     /// Return current branch name, or None if detached
     #[inline]
     pub fn current_branch(&self) -> Result<Option<String>> {
-        let head = std::fs::read_to_string(self.root.join(".vx/HEAD"))?;
+        let head = std::fs::read_to_string(self.root.join(".mog/HEAD"))?;
         let head = head.trim();
 
         if let Some(refpath) = head.strip_prefix("ref: ") {
@@ -172,7 +174,7 @@ target/\n\
     /// Resolve branch or hex to (`commit_hash`, `CommitId`).
     pub fn resolve_to_commit(&mut self, target: &str) -> Result<(Hash, CommitId)> {
         let branch_ref = format!("refs/heads/{target}");
-        let branch_path = self.root.join(".vx").join(&branch_ref);
+        let branch_path = self.root.join(".mog").join(&branch_ref);
 
         let hash = if branch_path.exists() {
             self.read_ref(&branch_ref)?
@@ -198,7 +200,7 @@ target/\n\
 
             if let Ok(obj) = self.read_object(&hash) {
                 if let Ok(id) = obj.try_as_commit_id() {
-                    stack.extend(self.commit_store.get_parents(id));
+                    stack.extend(self.commit.get_parents(id));
                 }
             }
         }
@@ -222,7 +224,7 @@ target/\n\
         }
 
         for &component in &components[..components.len() - 1] {
-            let hash = self.tree_store
+            let hash = self.tree
                 .find_entry(current_id, component)
                 .ok_or_else(|| anyhow::anyhow!("path not found: '{component}'"))?;
             let obj = self.read_object(&hash)?;
@@ -230,7 +232,7 @@ target/\n\
         }
 
         let last = components[components.len() - 1];
-        let hash = self.tree_store
+        let hash = self.tree
             .find_entry(current_id, last)
             .ok_or_else(|| anyhow::anyhow!("path not found: '{last}'"))?;
 

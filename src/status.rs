@@ -6,41 +6,76 @@ use crate::index::Index;
 use crate::object::MODE_DIR;
 use crate::repository::Repository;
 use crate::store::TreeId;
-use crate::tree::TreeEntry;
+use crate::tree::TreeEntryRef;
+use crate::util::{stdout_is_tty, str_from_utf8_data_shouldve_been_valid_or_we_got_hacked};
 
+use std::borrow::Cow;
 use std::path::Path;
 use std::fs;
 
 use anyhow::Result;
 use walkdir::WalkDir;
+use rayon::prelude::*;
 
-// --- HEAD tree as flat SoA: one blob per path, sorted for binary search ---
+pub fn status(repo: &mut Repository) -> Result<()> {
+    let index = Index::load(&repo.root)?;
+    let head_commit = repo.read_head_commit().ok();
+    let head_tree = head_commit
+        .and_then(|hash| repo.read_object(&hash).ok())
+        .and_then(|obj| obj.try_as_commit_id().ok())
+        .map(|id| repo.commit.get_tree(id));
 
+    let head_flat = match head_tree {
+        Some(tree_hash) => flatten_head_tree(repo, tree_hash)?,
+        None => HeadTreeFlat {
+            path_blob: Box::default(),
+            path_offsets: [0].into(),
+            hashes: Box::default(),
+            sorted_order: Box::default(),
+        },
+    };
+
+    let buckets = collect_status(&index, &head_flat, &repo.root, &repo.ignore);
+    print_status(&buckets, &mut std::io::stdout())?;
+    Ok(())
+}
+
+// HEAD tree, sorted for binary search
 pub struct HeadTreeFlat {
     /// Path strings concatenated; no trailing slash.
-    path_blob: Vec<u8>,
+    path_blob: Box<[u8]>,
     /// Start offset of path i in `path_blob`. len+1 entries (last = `path_blob.len()`).
-    path_offsets: Vec<u32>,
+    path_offsets: Box<[u32]>,
     /// Hash for path at index i.
-    hashes: Vec<Hash>,
+    hashes: Box<[Hash]>,
     /// Sorted by path for lookup: `sorted_order`[j] = index into `path_offsets/hashes`.
-    sorted_order: Vec<usize>,
+    sorted_order: Box<[usize]>,
 }
 
 impl HeadTreeFlat {
     #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.hashes.len()
     }
 
     #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    #[must_use]
     pub fn get_path(&self, i: usize) -> &str {
         let start = self.path_offsets[i] as usize;
         let end = self.path_offsets[i + 1] as usize;
-        std::str::from_utf8(&self.path_blob[start..end]).expect("utf8")
+        str_from_utf8_data_shouldve_been_valid_or_we_got_hacked(&self.path_blob[start..end])
     }
 
     /// Binary search by path. Returns Some(hash) if path is a blob in HEAD tree.
+    #[inline]
+    #[must_use]
     pub fn lookup(&self, path: &str) -> Option<Hash> {
         let sorted = &self.sorted_order;
         let mut lo = 0;
@@ -66,6 +101,13 @@ fn flatten_head_tree(repo: &mut Repository, tree_hash: Hash) -> Result<HeadTreeF
         prefix: Box<str>
     }
 
+    #[inline]
+    fn head_tree_path_at<'a>(path_blob: &'a [u8], path_offsets: &[u32], i: usize) -> &'a [u8] {
+        let start = path_offsets[i] as usize;
+        let end = path_offsets[i + 1] as usize;
+        &path_blob[start..end]
+    }
+
     let mut path_blob = Vec::new();
     let mut path_offsets = Vec::new();
     let mut hashes = Vec::new();
@@ -78,40 +120,43 @@ fn flatten_head_tree(repo: &mut Repository, tree_hash: Hash) -> Result<HeadTreeF
     }];
 
     while let Some(frame) = stack.pop() {
-        let n = repo.tree_store.entry_count(frame.tree_id);
+        let n = repo.tree.entry_count(frame.tree_id);
         for j in 0..n {
-            let TreeEntry { mode, hash, name } = repo.tree_store.get_entry(frame.tree_id, j);
+            let TreeEntryRef { mode, hash, name } = repo.tree.get_entry_ref(frame.tree_id, j);
 
             if mode == MODE_DIR {
-                let obj = repo.read_object(&hash)?;
-                let sub_id = obj.try_as_tree_id()?;
                 let path = if frame.prefix.is_empty() {
-                    name
+                    Cow::Borrowed(name)
                 } else {
                     format!("{}/{}", frame.prefix, name).into()
-                };
+                }.into();
+
+                let object = repo.read_object(&hash)?;
+                let sub_id = object.try_as_tree_id()?;
                 stack.push(Frame {
                     tree_id: sub_id,
-                    prefix: path,
+                    prefix: path
                 });
-            } else {
-                if frame.prefix.is_empty() {
-                    path_offsets.push(path_blob.len() as u32);
-                    path_blob.extend_from_slice(name.as_bytes());
-                } else {
-                    path_offsets.push(path_blob.len() as u32);
-                    path_blob.extend_from_slice(frame.prefix.as_bytes());
-                    path_blob.push(b'/');
-                    path_blob.extend_from_slice(name.as_bytes());
-                }
-                hashes.push(hash);
+
+                continue;
             }
+
+            if frame.prefix.is_empty() {
+                path_offsets.push(path_blob.len() as u32);
+                path_blob.extend_from_slice(name.as_bytes());
+            } else {
+                path_offsets.push(path_blob.len() as u32);
+                path_blob.extend_from_slice(frame.prefix.as_bytes());
+                path_blob.push(b'/');
+                path_blob.extend_from_slice(name.as_bytes());
+            }
+            hashes.push(hash);
         }
     }
     path_offsets.push(path_blob.len() as u32);
 
     let n = hashes.len();
-    let mut sorted_order: Vec<usize> = (0..n).collect();
+    let mut sorted_order: Box<[_]> = (0..n).collect();
     sorted_order.sort_by(|&a, &b| {
         let sa = head_tree_path_at(&path_blob, &path_offsets, a);
         let sb = head_tree_path_at(&path_blob, &path_offsets, b);
@@ -119,61 +164,53 @@ fn flatten_head_tree(repo: &mut Repository, tree_hash: Hash) -> Result<HeadTreeF
     });
 
     Ok(HeadTreeFlat {
-        path_blob,
-        path_offsets,
-        hashes,
+        path_blob: crate::util::vec_into_boxed_slice_noshrink(path_blob),
+        path_offsets: crate::util::vec_into_boxed_slice_noshrink(path_offsets),
+        hashes: crate::util::vec_into_boxed_slice_noshrink(hashes),
         sorted_order,
     })
 }
 
-#[inline]
-fn head_tree_path_at<'a>(path_blob: &'a [u8], path_offsets: &[u32], i: usize) -> &'a [u8] {
-    let start = path_offsets[i] as usize;
-    let end = path_offsets[i + 1] as usize;
-    &path_blob[start..end]
-}
-
-// --- Status buckets: one Vec per category (DOD: parallel to path strings) ---
-
 pub struct StatusBuckets {
     /// Staged: in index, (new or index.hash != head hash).
-    pub staged_new_modified: Vec<String>,
+    pub staged_new_modified: Vec<Box<str>>,
+
     /// Staged delete: in HEAD, not in index.
-    pub staged_deleted: Vec<String>,
+    pub staged_deleted: Vec<Box<str>>,
+
     /// In index, file on disk exists but content differs (mtime/size).
-    pub modified: Vec<String>,
+    pub modified: Vec<Box<str>>,
     /// In index, file missing on disk.
-    pub deleted: Vec<String>,
-    /// Not in index, file on disk (under repo, not .vx).
-    pub untracked: Vec<String>,
+    pub deleted: Vec<Box<str>>,
+
+    /// Not in index, file on disk (under repo, not .mog).
+    pub untracked: Vec<Box<str>>,
 }
 
-/// Single pass: scan index (stat + compare to head), then walk dir for untracked.
+/// Scan index (stat + compare to head), then walk dir for untracked.
 fn collect_status(
     index: &Index,
     head: &HeadTreeFlat,
     repo_root: &Path,
     ignore: &Ignore,
 ) -> StatusBuckets {
-    let mut staged_new_modified = Vec::new();
-    let mut staged_deleted = Vec::new();
-    let mut modified = Vec::new();
-    let mut deleted = Vec::new();
+    struct IndexResult {
+        path: Box<str>,
+        staged: bool,
+        disk: DiskState,
+    }
 
-    for i in 0..index.count {
+    enum DiskState { Clean, Modified, Deleted }
+
+    let index_results = (0..index.count).into_par_iter().map(|i| {
         let path_str = index.get_path(i);
-        let rel_path = Path::new(path_str);
-        let abs = repo_root.join(rel_path);
-
-        let head_hash = head.lookup(path_str);
+        let abs = repo_root.join(&path_str);
+        let head_hash = head.lookup(&path_str);
         let index_hash = index.hashes[i];
 
         let staged = head_hash != Some(index_hash);
-        if staged {
-            staged_new_modified.push(path_str.to_string());
-        }
 
-        match fs::metadata(&abs) {
+        let disk = match fs::metadata(&abs) {
             Ok(meta) => {
                 let mtime = meta
                     .modified()
@@ -183,22 +220,38 @@ fn collect_status(
 
                 let size = meta.len();
                 if index.mtimes[i] != mtime || index.sizes[i] != size {
-                    if !staged {
-                        // could be staged and modified; we already added to staged above
-                    }
-                    modified.push(path_str.to_string());
+                    DiskState::Modified
+                } else {
+                    DiskState::Clean
                 }
             }
-            Err(_) => {
-                deleted.push(path_str.to_string());
-            }
+
+            Err(_) => DiskState::Deleted,
+        };
+
+        IndexResult { path: path_str.into(), staged, disk }
+    }).collect::<Vec<_>>();
+
+    let mut staged_new_modified = Vec::new();
+    let mut modified            = Vec::new();
+    let mut deleted             = Vec::new();
+
+    for r in index_results {
+        if r.staged { staged_new_modified.push(r.path.clone()); } // @Clone
+
+        match r.disk {
+            DiskState::Modified => modified.push(r.path),
+            DiskState::Deleted  => deleted.push(r.path),
+            DiskState::Clean    => {}
         }
     }
 
+    // --- Staged deletes (in HEAD, not in index) ---
+    let mut staged_deleted = Vec::new();
     for j in 0..head.len() {
         let path_str = head.get_path(head.sorted_order[j]);
-        if index.find(Path::new(path_str)).is_none() {
-            staged_deleted.push(path_str.to_string());
+        if index.find(&path_str).is_none() {
+            staged_deleted.push(path_str.into());
         }
     }
 
@@ -208,66 +261,27 @@ fn collect_status(
         .filter_entry(|e| !ignore.is_ignored_abs(e.path()))
         .filter_map(Result::ok)
     {
-        if !entry.file_type().is_file() {
-            continue;
-        }
+        if !entry.file_type().is_file() { continue; }
+
         let path = entry.path();
+
         let Ok(rel) = path.strip_prefix(repo_root) else { continue };
+
         let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if rel_str.is_empty() {
-            continue;
-        }
-        if ignore.is_ignored_rel(&rel_str) {
-            continue;
-        }
-        if index.find(Path::new(&rel_str)).is_none() {
-            untracked.push(rel_str);
+        if rel_str.is_empty() || ignore.is_ignored_rel(&rel_str) { continue; }
+
+        if index.find(&rel_str).is_none() {
+            untracked.push(rel_str.into());
         }
     }
-    untracked.sort();
-    staged_new_modified.sort();
-    staged_deleted.sort();
-    modified.sort();
-    deleted.sort();
 
-    StatusBuckets {
-        staged_new_modified,
-        staged_deleted,
-        modified,
-        deleted,
-        untracked,
-    }
-}
+    staged_new_modified.sort_unstable();
+    staged_deleted.sort_unstable();
+    modified.sort_unstable();
+    deleted.sort_unstable();
+    untracked.sort_unstable();
 
-// --- Output: sections, optional color ---
-
-fn stdout_is_tty() -> bool {
-    use std::io::IsTerminal;
-    std::io::stdout().is_terminal()
-}
-
-const GREEN:  &str = "\x1b[32m";
-const RED:    &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
-const BOLD:  &str = "\x1b[1m";
-const RESET: &str = "\x1b[0m";
-
-fn section_header(f: &mut (impl std::io::Write + ?Sized), color: &str, title: &str) -> std::io::Result<()> {
-    if stdout_is_tty() {
-        writeln!(f, "  {}{}{}", color, title, RESET)?;
-    } else {
-        writeln!(f, "  {}", title)?;
-    }
-    Ok(())
-}
-
-fn path_line(f: &mut (impl std::io::Write + ?Sized), color: &str, path: &str) -> std::io::Result<()> {
-    if stdout_is_tty() {
-        writeln!(f, "    {}{}{}", color, path, RESET)?;
-    } else {
-        writeln!(f, "    {}", path)?;
-    }
-    Ok(())
+    StatusBuckets { staged_new_modified, staged_deleted, modified, deleted, untracked }
 }
 
 pub fn print_status(buckets: &StatusBuckets, out: &mut (impl std::io::Write + ?Sized)) -> std::io::Result<()> {
@@ -327,23 +341,27 @@ pub fn print_status(buckets: &StatusBuckets, out: &mut (impl std::io::Write + ?S
     Ok(())
 }
 
-pub fn status(repo: &mut Repository) -> Result<()> {
-    let index = Index::load(&repo.root)?;
-    let head_commit = repo.read_head_commit().ok();
-    let head_tree = head_commit
-        .and_then(|hash| repo.read_object(&hash).ok())
-        .and_then(|obj| obj.try_as_commit_id().ok())
-        .map(|id| repo.commit_store.get_tree(id));
-    let head_flat = match head_tree {
-        Some(tree_hash) => flatten_head_tree(repo, tree_hash)?,
-        None => HeadTreeFlat {
-            path_blob: Vec::new(),
-            path_offsets: vec![0],
-            hashes: Vec::new(),
-            sorted_order: Vec::new(),
-        },
-    };
-    let buckets = collect_status(&index, &head_flat, &repo.root, &repo.ignore);
-    print_status(&buckets, &mut std::io::stdout())?;
+
+const GREEN:  &str = "\x1b[32m";
+const RED:    &str = "\x1b[31m";
+const YELLOW: &str = "\x1b[33m";
+const BOLD:  &str = "\x1b[1m";
+const RESET: &str = "\x1b[0m";
+
+fn section_header(f: &mut (impl std::io::Write + ?Sized), color: &str, title: &str) -> std::io::Result<()> {
+    if stdout_is_tty() {
+        writeln!(f, "  {}{}{}", color, title, RESET)?;
+    } else {
+        writeln!(f, "  {}", title)?;
+    }
+    Ok(())
+}
+
+fn path_line(f: &mut (impl std::io::Write + ?Sized), color: &str, path: &str) -> std::io::Result<()> {
+    if stdout_is_tty() {
+        writeln!(f, "    {}{}{}", color, path, RESET)?;
+    } else {
+        writeln!(f, "    {}", path)?;
+    }
     Ok(())
 }

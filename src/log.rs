@@ -16,12 +16,12 @@ pub fn log(repo: &mut Repository, f: &mut dyn core::fmt::Write) -> Result<()> {
         };
 
         writeln!(f, "commit {}", hash_to_hex(&current))?;
-        writeln!(f, "Author: {}", repo.commit_store.get_author(commit_id))?;
-        writeln!(f, "Date: {}", repo.commit_store.get_timestamp(commit_id))?;
-        writeln!(f, "\n    {}", repo.commit_store.get_message(commit_id))?;
+        writeln!(f, "Author: {}", repo.commit.get_author(commit_id))?;
+        writeln!(f, "Date: {}", repo.commit.get_timestamp(commit_id))?;
+        writeln!(f, "\n    {}", repo.commit.get_message(commit_id))?;
         writeln!(f)?;
 
-        let parents = repo.commit_store.get_parents(commit_id);
+        let parents = repo.commit.get_parents(commit_id);
         if parents.is_empty() {
             break;
         }

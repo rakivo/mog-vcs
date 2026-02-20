@@ -27,7 +27,7 @@ fn write_tree_recursive(repo: &mut Repository, dir: &Path) -> Result<Hash> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
 
-        // Ignore rules (repo-root-relative). Tracked files should use `vx add` instead.
+        // Ignore rules (repo-root-relative). Tracked files should use `mog add` instead.
         if let Ok(rel) = path.strip_prefix(&repo.root) {
             let rel_str = rel.to_string_lossy().replace('\\', "/");
             if repo.ignore.is_ignored_rel(&rel_str) {
@@ -35,7 +35,7 @@ fn write_tree_recursive(repo: &mut Repository, dir: &Path) -> Result<Hash> {
             }
         }
 
-        if name == ".vx" {
+        if name == ".mog" {
             continue;
         }
 
@@ -53,7 +53,7 @@ fn write_tree_recursive(repo: &mut Repository, dir: &Path) -> Result<Hash> {
         }
 
         let data = fs::read(&path)?;
-        let blob_id = repo.blob_store.push(&data);
+        let blob_id = repo.blob.push(&data);
         let hash = repo.write_object(Object::Blob(blob_id));
 
         let mode = if is_executable(&metadata) {
@@ -69,7 +69,7 @@ fn write_tree_recursive(repo: &mut Repository, dir: &Path) -> Result<Hash> {
         });
     }
 
-    let tree_id = repo.tree_store.extend(&tree_entries_buffer);
+    let tree_id = repo.tree.extend(&tree_entries_buffer);
     let hash = repo.write_object(Object::Tree(tree_id));
     Ok(hash)
 }

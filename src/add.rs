@@ -1,7 +1,9 @@
 use std::fs;
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::ignore::Ignore;
 use crate::tracy;
 use crate::hash::Hash;
 use crate::index::Index;
@@ -9,6 +11,7 @@ use crate::repository::Repository;
 use crate::object::encode_blob_into;
 
 use anyhow::Result;
+use rayon::prelude::*;
 use walkdir::WalkDir;
 use regex::Regex;
 
@@ -18,9 +21,9 @@ const ADD_MAX_FILE_BYTES:  usize = 1024 * 1024;
 pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
     let _span = tracy::span!("add");
 
-    let mut refused_over_limit = 0usize; // @Metric
-    let mut added_successfully = 0usize; // @Metric
-    let mut bytes_added_successfully = 0usize; // @Metric
+    let added_successfully       = AtomicUsize::new(0); // @Metric
+    let bytes_added_successfully = AtomicUsize::new(0); // @Metric
+    let refused_over_limit       = AtomicUsize::new(0); // @Metric
 
     let current_dir = std::env::current_dir()?;
     let mut index   = Index::load(&repo.root)?;
@@ -33,9 +36,154 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
 
     let default = [PathBuf::from(".")];
     let patterns = if paths.is_empty() { &default } else { paths };
+    let (literal_roots, combined_re) = classify_patterns(patterns, &current_dir);
 
-    let mut literal_roots = Vec::new();
-    let mut regexes       = Vec::new(); // @Speed @Memory: We most likely shouldn't store them like that.
+    //
+    //
+    // Collect candidate files.
+    //
+    //
+
+    let files_to_add = walk_matching(&repo.root, &repo.ignore, &literal_roots, combined_re.as_ref());
+
+    //
+    //
+    // Filter to dirty files within the size limit.
+    //
+    //
+
+    let mut files_to_process = Vec::<FileMeta>::new();
+
+    for (path, rel_norm_string) in files_to_add {
+        if repo.ignore.is_ignored_rel(&rel_norm_string) {
+            continue;
+        }
+
+        let metadata = match fs::metadata(&path) {
+            Ok(m)  => m,
+            Err(e) => {
+                eprintln!("metadata error for {}: {}", path.display(), e);
+                continue;
+            }
+        };
+
+        if metadata.len() > ADD_MAX_FILE_BYTES as u64 {
+            refused_over_limit.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
+
+        if let Some(i) = index.find(rel_norm_string.as_ref()) {
+            if !index.is_dirty(i, &metadata) {
+                continue;
+            }
+        }
+
+        files_to_process.push(FileMeta {
+            path: path.into(),
+            rel_norm: PathBuf::from(rel_norm_string.into_string()).into(),
+            meta: metadata,
+        });
+    }
+
+    if refused_over_limit.load(Ordering::Relaxed) > 0 {
+        eprintln!(
+            "Refused to add {refused_over_limit} file(s) over 1 MiB (max {ADD_MAX_FILE_BYTES} bytes)",
+            refused_over_limit = refused_over_limit.load(Ordering::Relaxed)
+        );
+    }
+
+    //
+    //
+    // Split into size-bounded batches, then read/encode/hash in parallel within each.
+    //
+    //
+
+    let mut batches: Vec<Vec<&FileMeta>> = vec![Vec::new()];
+    let mut current_batch_bytes = 0usize;
+
+    for file in &files_to_process {
+        let size = file.meta.len() as usize;
+        if current_batch_bytes + size > ADD_BATCH_MAX_BYTES && !batches.last().unwrap().is_empty() {
+            batches.push(Vec::new());
+            current_batch_bytes = 0;
+        }
+
+        batches.last_mut().unwrap().push(file);
+        current_batch_bytes += size;
+    }
+
+    for batch in batches {
+        //
+        // Read, encode, and hash in parallel.
+        //
+        let processed = batch.into_par_iter().filter_map(|file| {
+            let data = match fs::read(&file.path) {
+                Ok(d)  => d,
+                Err(e) => {
+                    eprintln!("read error for {}: {}", file.path.display(), e);
+                    return None;
+                }
+            };
+
+            let mut encoded = Vec::new();
+            encode_blob_into(&data, &mut encoded);
+            let hash = {
+                let _span = tracy::span!("add::hash");
+                Hash::from(blake3::hash(&encoded))
+            };
+
+            added_successfully.fetch_add(1, Ordering::Relaxed);
+            bytes_added_successfully.fetch_add(data.len(), Ordering::Relaxed);
+
+            Some(ProcessedFile {
+                file_meta: file,
+                encoded: crate::util::vec_into_boxed_slice_noshrink(encoded),
+                hash,
+            })
+        }).collect::<Vec<_>>();
+
+        //
+        // Build encoded_buf and flush.
+        //
+        let mut encoded_buf  = Vec::new();
+        let mut file_infos   = Vec::<FileInfo>::new();
+        let mut file_metas   = Vec::<&FileMeta>::new();
+
+        for ProcessedFile { file_meta, encoded, hash } in processed {
+            let offset = encoded_buf.len() as u32;
+            let len    = encoded.len() as u32;
+            encoded_buf.extend_from_slice(&encoded);
+            file_infos.push(FileInfo { hash, offset, len });
+            file_metas.push(file_meta);
+        }
+
+        flush_batch(repo, &mut index, &encoded_buf, &file_infos, &file_metas)?;
+    }
+
+    repo.storage.sync()?;
+    index.save(&repo.root)?;
+
+    println!(
+        "Added {added_successfully} file(s), {bytes_added_successfully} in byte(s)",
+        added_successfully = added_successfully.load(Ordering::Relaxed),
+        bytes_added_successfully = bytes_added_successfully.load(Ordering::Relaxed),
+    );
+
+    Ok(())
+}
+
+//
+//
+// Shared pattern matching helpers.
+//
+//
+
+pub fn classify_patterns(
+    patterns:      &[PathBuf],
+    current_dir:   &Path,
+) -> (Vec<PathBuf>, Option<Regex>) {
+    let mut literal_roots  = Vec::new();
+    let mut regex_patterns = Vec::new();
 
     for p in patterns {
         let candidate = if p.is_absolute() {
@@ -52,160 +200,61 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
                 Ok(canon) => literal_roots.push(canon),
                 Err(e)    => eprintln!("Cannot canonicalize '{}': {}", candidate.display(), e),
             }
-
             continue;
         }
 
         let s = p.to_string_lossy();
-        match Regex::new(&s) {
-            Ok(re) => regexes.push(re),
-            Err(_) => eprintln!("Invalid regex pattern '{}', skipping", s),
+        if Regex::new(&s).is_ok() {
+            regex_patterns.push(format!("(?:{})", s));
+        } else {
+            eprintln!("Invalid regex pattern '{}', skipping", s);
         }
     }
 
-    //
-    //
-    // Collect candidate files.
-    //
-    //
+    let combined_re = if regex_patterns.is_empty() {
+        None
+    } else {
+        match Regex::new(&regex_patterns.join("|")) {
+            Ok(re) => Some(re),
+            Err(e) => { eprintln!("Failed to combine regex patterns: {e}"); None }
+        }
+    };
 
-    let mut files_to_add = Vec::new();
+    (literal_roots, combined_re)
+}
 
-    for entry in WalkDir::new(&repo.root)
+/// Walk repo, returning (abs_path, rel_norm_string) for every non-ignored file
+/// that matches literal_roots or combined_re.
+pub fn walk_matching(
+    repo_root:    &Path,
+    ignore:       &Ignore,
+    literal_roots: &[PathBuf],
+    combined_re:   Option<&Regex>,
+) -> Vec<(Box<Path>, Box<str>)> {
+    let mut files = Vec::new();
+
+    for entry in WalkDir::new(repo_root)
         .into_iter()
-        .filter_entry(|e| !repo.ignore.is_ignored_abs(e.path()))
+        .filter_entry(|e| !ignore.is_ignored_abs(e.path()))
     {
         let Ok(entry) = entry else { continue };
-
         if !entry.file_type().is_file() { continue }
 
-        let path = entry.into_path();
-
-        let Ok(rel) = path.strip_prefix(&repo.root) else { continue };
-        let rel_norm_string = rel.to_string_lossy().replace('\\', "/");
+        let path = entry.into_path().into_boxed_path();
+        let Ok(rel) = path.strip_prefix(repo_root) else { continue };
+        let rel_norm = rel.to_string_lossy().replace('\\', "/").into_boxed_str();
 
         let matched = literal_roots.iter().any(|root| path.starts_with(root))
-            || regexes.iter().any(|re| re.is_match(&rel_norm_string));
+            || combined_re.is_some_and(|re| re.is_match(&rel_norm));
 
         if matched {
-            files_to_add.push(path);
+            files.push((path, rel_norm));
         }
     }
 
-    files_to_add.sort_unstable();
-    files_to_add.dedup();
-
-    //
-    //
-    // Filter to dirty files within the size limit.
-    //
-    //
-
-    let mut files_to_process = Vec::<FileMeta>::new();
-
-    for path in files_to_add {
-        //
-        // @Cutnpaste from above
-        //
-        let Ok(rel) = path.strip_prefix(&repo.root) else { continue };
-        let rel_norm_string = rel.to_string_lossy().replace('\\', "/");
-
-        if repo.ignore.is_ignored_rel(&rel_norm_string) {
-            continue;
-        }
-
-        let metadata = match fs::metadata(&path) {
-            Ok(m)  => m,
-            Err(e) => {
-                eprintln!("metadata error for {}: {}", path.display(), e);
-                continue;
-            }
-        };
-
-        if metadata.len() > ADD_MAX_FILE_BYTES as u64 {
-            refused_over_limit += 1;
-            continue;
-        }
-
-        if let Some(i) = index.find(rel_norm_string.as_ref()) {
-            if !index.is_dirty(i, &metadata) {
-                continue;
-            }
-        }
-
-        let rel_norm = PathBuf::from(&rel_norm_string);
-        files_to_process.push(FileMeta { path, rel_norm, meta: metadata.into() });
-    }
-
-    if refused_over_limit > 0 {
-        eprintln!(
-            "Refused to add {refused_over_limit} file(s) over 1 MiB (max {ADD_MAX_FILE_BYTES} bytes)"
-        );
-    }
-
-    //
-    //
-    // Encode and write in size-bounded batches.
-    //
-    //
-
-    let mut encoded_buf               = Vec::new();
-    let mut file_infos                = Vec::<FileInfo>::new();
-    let mut file_metas_batch          = Vec::<FileMeta>::new();
-    let mut current_batch_bytes       = 0usize;
-    let mut singular_blob_scratch_buf = Vec::new();
-
-    for file in files_to_process {
-        let FileMeta { path, meta: metadata, .. } = &file;
-
-        let size = metadata.len() as usize;
-
-        if current_batch_bytes + size > ADD_BATCH_MAX_BYTES {
-            flush_batch(repo, &mut index, &encoded_buf, &file_infos, &file_metas_batch)?;
-
-            //
-            // Reset the batch
-            //
-
-            // @Cleanup: Move this to flush_batch?
-            encoded_buf.clear();
-            file_infos.clear();
-            file_metas_batch.clear();
-            current_batch_bytes = 0;
-        }
-
-        let data = match fs::read(path) {
-            Ok(d)  => d,
-            Err(e) => {
-                eprintln!("read error for {}: {}", path.display(), e);
-                continue;
-            }
-        };
-
-        singular_blob_scratch_buf.clear();
-        encode_blob_into(&data, &mut singular_blob_scratch_buf);
-
-        let hash  = Hash::from(blake3::hash(&singular_blob_scratch_buf));
-        let offset = encoded_buf.len() as _;
-        let len = singular_blob_scratch_buf.len() as _;
-
-        encoded_buf.extend_from_slice(&singular_blob_scratch_buf);
-        file_infos.push(FileInfo { hash, offset, len });
-        file_metas_batch.push(file);
-        current_batch_bytes += size;
-
-        added_successfully += 1;
-        bytes_added_successfully += data.len();
-    }
-
-    flush_batch(repo, &mut index, &encoded_buf, &file_infos, &file_metas_batch)?;
-
-    repo.storage.sync()?;
-    index.save(&repo.root)?;
-
-    println!("Added {added_successfully} file(s), {bytes_added_successfully} in byte(s)");
-
-    Ok(())
+    files.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    files.dedup_by(|a, b| a.0 == b.0);
+    files
 }
 
 struct FileInfo {
@@ -215,10 +264,15 @@ struct FileInfo {
 }
 
 struct FileMeta {
-     // @Memory: Make these Box<Path>?
-    path: PathBuf,
-    rel_norm: PathBuf,
-    meta: Box<fs::Metadata>
+    path:     Box<Path>,
+    rel_norm: Box<Path>,
+    meta:     fs::Metadata,
+}
+
+struct ProcessedFile<'a> {
+    file_meta: &'a FileMeta,
+    encoded: Box<[u8]>,
+    hash:    Hash,
 }
 
 fn flush_batch(
@@ -226,7 +280,7 @@ fn flush_batch(
     index:       &mut Index,
     encoded_buf: &[u8],
     file_infos:  &[FileInfo],
-    file_metas:  &[FileMeta],
+    file_metas:  &[&FileMeta],
 ) -> Result<()> {
     if file_metas.is_empty() {
         return Ok(());
@@ -240,7 +294,7 @@ fn flush_batch(
     repo.storage.write_batch(hash_and_data_iter)?;
 
     for (FileMeta { rel_norm, meta, .. }, FileInfo { hash, .. }) in file_metas.iter().zip(file_infos.iter()) {
-        index.add(rel_norm.as_path(), *hash, meta);
+        index.add(rel_norm.to_str().unwrap(), *hash, meta);
     }
 
     Ok(())

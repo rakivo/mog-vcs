@@ -1,11 +1,12 @@
-use crate::commit::{CommitPayloadOwned, CommitPayloadRef};
-// SoA stores. ID = index into flat arrays.
 use crate::hash::Hash;
+use crate::commit::{CommitPayloadOwned, CommitPayloadRef};
 use crate::object::{encode_blob_into, Object, ObjectTag};
-use crate::tree::{TreeEntry, TreePayloadOwned, TreePayloadRef};
+use crate::tree::{TreeEntry, TreeEntryRef, TreePayloadOwned, TreePayloadRef};
+use crate::util::str_from_utf8_data_shouldve_been_valid_or_we_got_hacked;
 use crate::wire::{Decode, Encode, ReadCursor, WriteCursor};
-use cranelift_entity::{entity_impl, EntityRef};
+
 use anyhow::{Result, bail};
+use cranelift_entity::{entity_impl, EntityRef};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlobId(u32);
@@ -18,6 +19,13 @@ entity_impl!(TreeId, "tree");
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommitId(u32);
 entity_impl!(CommitId, "commit");
+
+#[derive(Default)]
+pub struct Stores {
+    pub blob: BlobStore,
+    pub tree: TreeStore,
+    pub commit: CommitStore,
+}
 
 #[derive(Default)]
 pub struct BlobStore {
@@ -37,6 +45,7 @@ impl BlobStore {
     }
 
     #[inline]
+    #[must_use]
     pub fn get(&self, id: BlobId) -> &[u8] {
         let i = id.index();
         let start = self.offsets[i] as usize;
@@ -47,59 +56,66 @@ impl BlobStore {
 
 #[derive(Default)]
 pub struct TreeStore {
-    pub entry_start: Vec<u32>,
-    pub entry_end: Vec<u32>,
+    pub entry_start: Vec<u32>, // Into names_blob
+    pub entry_len: Vec<u32>,
+
     pub modes: Vec<u32>,
+
     pub hashes: Vec<Hash>,
-    pub name_offsets: Vec<u32>,
-    pub name_end: Vec<u32>,
+
+    pub name_start: Vec<u32>, // Into names_blob
+    pub name_len: Vec<u32>,
+
     pub names_blob: Vec<u8>,
 }
 
-impl TreeStore  {
+impl TreeStore {
+    #[inline]
     pub fn extend(&mut self, entries: &[TreeEntry]) -> TreeId {
         let id = TreeId::new(self.entry_start.len());
-        let start = self.modes.len() as u32;
-        self.entry_start.push(start);
+        self.entry_start.push(self.modes.len() as u32);
+        self.entry_len.push(entries.len() as u32);
         for TreeEntry { mode, hash, name } in entries {
             self.modes.push(*mode);
             self.hashes.push(*hash);
-            self.name_offsets.push(self.names_blob.len() as u32);
+            self.name_start.push(self.names_blob.len() as u32);
+            self.name_len.push(name.len() as u32);
             self.names_blob.extend_from_slice(name.as_bytes());
         }
-        self.name_end.push(self.names_blob.len() as u32);
-        self.entry_end.push(self.modes.len() as u32);
         id
     }
 
     #[inline]
+    #[must_use]
     pub fn entry_count(&self, id: TreeId) -> usize {
-        let i = id.index();
-        (self.entry_end[i] - self.entry_start[i]) as usize
+        self.entry_len[id.index()] as usize
     }
 
     #[inline]
-    pub fn get_entry(&self, id: TreeId, j: usize) -> TreeEntry {
-        let i = id.index();
-        let base = self.entry_start[i] as usize;
-        let idx = base + j;
+    #[must_use]
+    pub fn get_entry_ref(&self, id: TreeId, j: usize) -> TreeEntryRef<'_> {
+        let idx = self.entry_start[id.index()] as usize + j;
         let mode = self.modes[idx];
         let hash = self.hashes[idx];
-        let start = self.name_offsets[idx] as usize;
-        let end = if idx + 1 < self.entry_end[i] as usize {
-            self.name_offsets[idx + 1] as usize
-        } else {
-            self.name_end[i] as usize
-        };
-        let name = std::str::from_utf8(&self.names_blob[start..end]).expect("utf8");
-        TreeEntry { hash, mode, name: name.into() }
+        let start = self.name_start[idx] as usize;
+        let end = start + self.name_len[idx] as usize;
+        let name = str_from_utf8_data_shouldve_been_valid_or_we_got_hacked(&self.names_blob[start..end]);
+        TreeEntryRef { hash, mode, name }
     }
 
+    #[inline]
+    #[must_use]
+    pub fn get_entry(&self, id: TreeId, j: usize) -> TreeEntry {
+        self.get_entry_ref(id, j).into()
+    }
+
+    #[must_use]
+    #[inline]
     pub fn find_entry(&self, id: TreeId, name: &str) -> Option<Hash> {
         let n = self.entry_count(id);
         for j in 0..n {
-            let TreeEntry { hash, name: entry_name, .. } = self.get_entry(id, j);
-            if entry_name.as_ref() == name {
+            let TreeEntryRef { hash, name: entry_name, .. } = self.get_entry_ref(id, j);
+            if entry_name == name {
                 return Some(hash);
             }
         }
@@ -110,18 +126,25 @@ impl TreeStore  {
 #[derive(Default)]
 pub struct CommitStore {
     pub tree: Vec<Hash>,
+
     pub parent_count: Vec<u32>,
     pub parent_start: Vec<u32>,
+
     pub parents: Vec<Hash>,
+
     pub timestamp: Vec<i64>,
-    pub author_start: Vec<u32>,
+
+    pub author_start: Vec<u32>, // Into strings
     pub author_len: Vec<u32>,
-    pub message_start: Vec<u32>,
+
+    pub message_start: Vec<u32>, // Into strings
     pub message_len: Vec<u32>,
+
     pub strings: Vec<u8>,
 }
 
 impl CommitStore {
+    #[inline]
     pub fn push(&mut self, tree: Hash, parents: &[Hash], timestamp: i64, author: &str, message: &str) -> CommitId {
         let id = CommitId::new(self.tree.len());
         self.tree.push(tree);
@@ -138,16 +161,19 @@ impl CommitStore {
         id
     }
 
+    #[inline]
     pub fn push_payload_owned(&mut self, p: &CommitPayloadOwned) -> CommitId {
         self.push(p.tree, &p.parents, p.timestamp, &p.author, &p.message)
     }
 
     #[inline]
+    #[must_use]
     pub fn get_tree(&self, id: CommitId) -> Hash {
         self.tree[id.index()]
     }
 
     #[inline]
+    #[must_use]
     pub fn get_parents(&self, id: CommitId) -> &[Hash] {
         let i = id.index();
         let start = self.parent_start[i] as usize;
@@ -156,24 +182,27 @@ impl CommitStore {
     }
 
     #[inline]
+    #[must_use]
     pub fn get_timestamp(&self, id: CommitId) -> i64 {
         self.timestamp[id.index()]
     }
 
     #[inline]
+    #[must_use]
     pub fn get_author(&self, id: CommitId) -> &str {
         let i = id.index();
         let start = self.author_start[i] as usize;
         let len = self.author_len[i] as usize;
-        std::str::from_utf8(&self.strings[start..start + len]).expect("utf8")
+        str_from_utf8_data_shouldve_been_valid_or_we_got_hacked(&self.strings[start..start + len])
     }
 
     #[inline]
+    #[must_use]
     pub fn get_message(&self, id: CommitId) -> &str {
         let i = id.index();
         let start = self.message_start[i] as usize;
         let len = self.message_len[i] as usize;
-        std::str::from_utf8(&self.strings[start..start + len]).expect("utf8")
+        str_from_utf8_data_shouldve_been_valid_or_we_got_hacked(&self.strings[start..start + len])
     }
 }
 
@@ -185,39 +214,35 @@ pub fn blob_encode_and_hash(store: &BlobStore, id: BlobId, buf: &mut Vec<u8>) ->
 
 /// Encode Object (id) from stores into buf. Same on-disk format as before.
 pub fn encode_object_into(
-    obj: Object,
-    blob: &BlobStore,
-    tree: &TreeStore,
-    commit: &CommitStore,
+    object: Object,
+    stores: &Stores,
     buf: &mut Vec<u8>,
 ) {
     buf.clear();
     buf.extend_from_slice(b"VX01");
-    match obj {
+    match object {
         Object::Blob(id) => {
             buf.push(ObjectTag::Blob.as_byte());
             let mut w = WriteCursor::new(buf);
-            let data = blob.get(id);
+            let data = stores.blob.get(id);
             w.write_u64(data.len() as u64);
             w.write_slice(data);
         }
         Object::Tree(id) => {
             buf.push(ObjectTag::Tree.as_byte());
-            TreePayloadRef::new(tree, id).view().encode(&mut WriteCursor::new(buf));
+            TreePayloadRef::new(&stores.tree, id).view().encode(&mut WriteCursor::new(buf));
         }
         Object::Commit(id) => {
             buf.push(ObjectTag::Commit.as_byte());
-            CommitPayloadRef::new(commit, id).view().encode(&mut WriteCursor::new(buf));
+            CommitPayloadRef::new(&stores.commit, id).view().encode(&mut WriteCursor::new(buf));
         }
     }
 }
 
 /// Decode object bytes into stores; return Object(id).
-pub fn decode_into_stores(
+pub fn decode_object_into_stores(
     data: &[u8],
-    blob: &mut BlobStore,
-    tree: &mut TreeStore,
-    commit: &mut CommitStore,
+    stores: &mut Stores
 ) -> Result<Object> {
     if data.len() < 5 {
         bail!("data too short");
@@ -232,17 +257,17 @@ pub fn decode_into_stores(
         Some(ObjectTag::Blob) => {
             let len = r.read_u64()? as usize;
             let bytes = r.read_bytes(len)?;
-            let id = blob.push(bytes);
+            let id = stores.blob.push(bytes);
             Ok(Object::Blob(id))
         }
         Some(ObjectTag::Tree) => {
             let p = TreePayloadOwned::decode(&mut r)?;
-            let id = tree.extend(&p.entries);
+            let id = stores.tree.extend(&p.entries);
             Ok(Object::Tree(id))
         }
         Some(ObjectTag::Commit) => {
             let p = CommitPayloadOwned::decode(&mut r)?;
-            let id = commit.push_payload_owned(&p);
+            let id = stores.commit.push_payload_owned(&p);
             Ok(Object::Commit(id))
         }
         None => bail!("unknown object type"),
@@ -250,8 +275,9 @@ pub fn decode_into_stores(
 }
 
 /// Hash of object encoded from stores.
-pub fn object_hash(obj: Object, blob: &BlobStore, tree: &TreeStore, commit: &CommitStore) -> Hash {
+#[must_use]
+pub fn object_hash(object: Object, stores: &Stores) -> Hash {
     let mut buf = Vec::new();
-    encode_object_into(obj, blob, tree, commit, &mut buf);
+    encode_object_into(object, stores, &mut buf);
     blake3::hash(&buf).into()
 }

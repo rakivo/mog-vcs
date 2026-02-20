@@ -1,5 +1,5 @@
 [package]
-name = "vx"
+name = "mog"
 version = "0.1.0"
 edition = "2021"
 
@@ -21,6 +21,7 @@ memmap2 = "0.9.10"
 libc = "0.2.182"
 cranelift-entity = "0.112"
 regex = "1.11"
+rayon = "1.11.0"
 
 [profile.dev.package."*"]
 debug = 2

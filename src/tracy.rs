@@ -48,6 +48,7 @@ pub fn message_color(s: &str, rgba: u32) {
 /// The string must be static or otherwise live for the entire program,
 /// as Tracy stores the pointer internally.
 #[inline(always)]
+#[must_use] 
 pub fn create_plot(name: &str) -> tracy_client::PlotName {
     tracy_client::PlotName::new_leak(name.into())
 }

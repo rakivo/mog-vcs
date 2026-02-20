@@ -20,16 +20,19 @@ pub struct ReadCursor<'a> {
 
 impl<'a> ReadCursor<'a> {
     #[inline]
+    #[must_use] 
     pub fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0 }
     }
 
     #[inline]
+    #[must_use] 
     pub fn remaining(&self) -> &'a [u8] {
         &self.data[self.pos..]
     }
 
     #[inline]
+    #[must_use] 
     pub fn at_end(&self) -> bool {
         self.pos >= self.data.len()
     }
