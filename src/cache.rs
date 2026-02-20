@@ -24,7 +24,7 @@ impl Default for EncodedCache {
 impl EncodedCache {
     /// Get encoded bytes by hash, if present. Reference is valid until the next mutating call.
     #[inline]
-    #[must_use] 
+    #[must_use]
     pub fn get(&self, hash: &Hash) -> Option<&[u8]> {
         self.entries
             .iter()
@@ -32,7 +32,15 @@ impl EncodedCache {
             .map(|(_, v)| v.as_slice())
     }
 
+    /// Get encoded bytes by hash, if present. Reference is valid until the next mutating call.
+    #[inline]
+    #[must_use]
+    pub fn contains(&self, hash: &Hash) -> bool {
+        self.get(hash).is_some()
+    }
+
     /// Insert encoded bytes. Evicts oldest entries until total size <= `max_bytes`.
+    #[inline]
     pub fn insert(&mut self, hash: Hash, data: Vec<u8>) {
         let len = data.len();
         self.total_bytes += len;

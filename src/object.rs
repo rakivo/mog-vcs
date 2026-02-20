@@ -1,4 +1,4 @@
-use crate::{hash::Hash, store::{BlobId, CommitId, TreeId}, tree::TreeEntryRef, util::str_from_utf8_data_shouldve_been_valid_or_we_got_hacked};
+use crate::{hash::Hash, store::{BlobId, CommitId, TreeId}, tree::{TreeEntry, TreeEntryRef, TreePayloadOwned}, util::str_from_utf8_data_shouldve_been_valid_or_we_got_hacked, wire::{Decode, ReadCursor}};
 
 use anyhow::{bail, Result};
 
@@ -82,6 +82,19 @@ pub fn encode_blob_into(data: &[u8], buf: &mut Vec<u8>) {
     buf.extend_from_slice(data);
 }
 
+#[inline]
+pub fn decode_blob_bytes(data: &[u8]) -> Result<&[u8]> {
+    if data.len() < 5 { bail!("data too short"); }
+
+    if &data[0..4] != b"VX01" { bail!("invalid magic"); }
+    if data[4] != ObjectTag::Blob as u8 { bail!("not a blob"); }
+
+    let mut r = ReadCursor::new(&data[5..]);
+    let len = r.read_u64()? as usize;
+
+    r.read_bytes(len)
+}
+
 /// Encode raw bytes as on-disk blob (VX01 + type + len + data).
 #[inline]
 pub fn hash_blob(data: &[u8]) -> Hash {
@@ -93,6 +106,18 @@ pub fn hash_blob(data: &[u8]) -> Hash {
     hasher.update(data);
 
     hasher.finalize().into()
+}
+
+#[inline]
+pub fn decode_tree_entries(data: &[u8]) -> Result<Box<[TreeEntry]>> {
+    if data.len() < 5 { bail!("data too short"); }
+
+    if &data[0..4] != b"VX01" { bail!("invalid magic"); }
+    if data[4] != ObjectTag::Tree as u8 { bail!("not a tree"); }
+
+    let mut r = ReadCursor::new(&data[5..]);
+    let p = TreePayloadOwned::decode(&mut r)?;
+    Ok(p.entries)
 }
 
 #[derive(Debug, Clone)]

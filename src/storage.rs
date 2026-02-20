@@ -19,7 +19,7 @@ const ENTRY_HEADER_SIZE: usize = 36; // hash(32) + size(4)
 
 pub struct PendingStorageWrite {
     pub hash: Hash,
-    pub data: Vec<u8>,
+    pub data: Box<[u8]>,
 }
 
 pub struct Storage {
@@ -35,7 +35,7 @@ impl Drop for Storage {
     fn drop(&mut self) {
         // Best-effort: flush any pending writes and sync.
         // Ignore errors here; they will have been reported at call sites.
-        let _ = self.flush();
+        _ = self.flush();
     }
 }
 
@@ -88,20 +88,8 @@ impl Storage {
     fn open_existing(path: &Path) -> Result<Self> {
         let _span = tracy::span!("Storage::open_existing");
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)?;
-
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
         let mmap = unsafe { MmapOptions::new().map_mut(&file)? };
-
-        unsafe {
-            madvise(
-                mmap.as_ptr() as *mut libc::c_void,
-                mmap.len(),
-                MADV_SEQUENTIAL | MADV_WILLNEED
-            );
-        }
 
         if mmap.len() < HEADER_SIZE {
             bail!("corrupted object database");
@@ -112,14 +100,28 @@ impl Storage {
         }
 
         let file_len = file.metadata()?.len();
+        let ht_end = HEADER_SIZE + HASH_TABLE_SIZE;
 
-        // Don't keep object data resident when repo is huge (e.g. add only touches hash table).
-        let data_start = DATA_START as usize;
-        let data_len = mmap.len().saturating_sub(data_start);
-        if data_len > 0 {
-            unsafe {
-                let data_ptr = mmap.as_ptr().add(data_start) as *mut libc::c_void;
-                madvise(data_ptr, data_len, MADV_DONTNEED);
+        unsafe {
+            //
+            // Eagerly load only the header + hash table we'll probe it on every lookup.
+            //
+            madvise(
+                mmap.as_ptr() as *mut libc::c_void,
+                ht_end.min(mmap.len()),
+                MADV_WILLNEED,
+            );
+
+            //
+            // Tell the kernel it can evict all object data pages immediately.
+            //
+            let data_len = mmap.len().saturating_sub(ht_end);
+            if data_len > 0 {
+                madvise(
+                    mmap.as_ptr().add(ht_end) as *mut libc::c_void,
+                    data_len,
+                    MADV_DONTNEED,
+                );
             }
         }
 
@@ -151,7 +153,7 @@ impl Storage {
     }
 
     #[inline]
-    #[must_use] 
+    #[must_use]
     pub fn exists(&self, hash: &Hash) -> bool {
         let _span = tracy::span!("Storage::exists");
 
@@ -182,7 +184,7 @@ impl Storage {
     }
 
     /// Read encoded object bytes by hash.
-    pub fn read(&self, hash: &Hash) -> Result<Vec<u8>> {
+    pub fn read(&self, hash: &Hash) -> Result<&[u8]> {
         let _span = tracy::span!("Storage::read");
 
         let bucket = Self::hash_to_bucket(hash);
@@ -203,9 +205,7 @@ impl Storage {
                 ) as usize;
 
                 let data = &self.mmap[pos + 36..pos + 36 + size];
-                let mut out = Vec::with_capacity(size);
-                out.extend_from_slice(data);
-                return Ok(out);
+                return Ok(data);
             }
 
             current_bucket = (current_bucket + 1) % HASH_TABLE_BUCKETS;
@@ -216,12 +216,13 @@ impl Storage {
     }
 
     /// Push encoded bytes; caller hashes. Used by `write_object`.
-    pub fn write(&mut self, hash: Hash, data: Vec<u8>) {
+    #[inline]
+    pub fn write(&mut self, hash: Hash, data: impl Into<Box<[u8]>>) {
         if self.exists(&hash) {
             return;
         }
 
-        self.pending_writes.push(PendingStorageWrite { hash, data });
+        self.pending_writes.push(PendingStorageWrite { hash, data: data.into() });
     }
 
     /// Write encoded objects from caller buffers. One buffer, one `write_at`.
@@ -285,10 +286,26 @@ impl Storage {
     }
 
     /// Flush mmap and fsync. Call once after many `write_batch` calls (e.g. at end of add).
+    #[inline]
     pub fn sync(&mut self) -> Result<()> {
         self.mmap.flush()?;
         self.file.sync_all()?;
         Ok(())
+    }
+
+    #[inline]
+    pub fn evict_pages(&self, data: &[u8]) {
+        #[cfg(unix)] {
+            unsafe {
+                let ptr   = data.as_ptr() as usize;
+                let end   = ptr + data.len();
+                let page  = 4096usize;
+                // round down to page boundary
+                let aligned_ptr = (ptr & !(page - 1)) as *mut libc::c_void;
+                let aligned_len = end.next_multiple_of(page) - (ptr & !(page - 1));
+                libc::madvise(aligned_ptr, aligned_len, libc::MADV_DONTNEED);
+            }
+        }
     }
 
     pub fn flush(&mut self) -> Result<()> {

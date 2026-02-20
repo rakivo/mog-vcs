@@ -4,6 +4,7 @@ use crate::storage::Storage;
 use crate::object::Object;
 use crate::store::{decode_object_into_stores, encode_object_into, object_hash, CommitId, Stores};
 use crate::hash::{Hash, hash_to_hex, hex_to_hash};
+use crate::tree::TreeEntry;
 use crate::util::Xxh3HashSet;
 
 use std::ops::{Deref, DerefMut};
@@ -98,12 +99,34 @@ target/\n\
             );
         }
         let data = self.storage.read(hash)?;
-        let obj = decode_object_into_stores(
+        let object = decode_object_into_stores(
             &data,
             &mut self.stores
         )?;
-        self.object_cache.insert(*hash, data);
-        Ok(obj)
+        self.object_cache.insert(*hash, data.to_vec()); // @Clone
+        Ok(object)
+    }
+
+    #[inline]
+    pub fn read_tree_entries_without_touching_cache(&mut self, hash: &Hash) -> Result<Box<[TreeEntry]>> {
+        let data = self.storage.read(hash)?;
+        crate::object::decode_tree_entries(data)
+    }
+
+    #[inline]
+    pub fn read_blob_bytes_without_touching_cache(&mut self, hash: &Hash) -> Result<&[u8]> {
+        let data = self.storage.read(hash)?;
+        crate::object::decode_blob_bytes(data)
+    }
+
+    #[inline]
+    pub fn read_blob_bytes_without_touching_stores(&mut self, hash: &Hash) -> Result<&[u8]> {
+        if !self.object_cache.contains(hash) {
+            let data = self.storage.read(hash)?;
+            self.object_cache.insert(*hash, data.to_vec());
+        }
+        let cached = self.object_cache.get(hash).unwrap();
+        crate::object::decode_blob_bytes(cached)
     }
 
     /// Encode from stores, hash, push to storage. Returns hash.
