@@ -1,24 +1,13 @@
-// Encoded object bytes cache. 1MB cap (jj-style); FIFO eviction.
-
-use crate::hash::Hash;
-use std::collections::VecDeque;
+use crate::{hash::Hash, util::Xxh3HashMap};
+use std::collections::{VecDeque, HashMap};
 
 const CACHE_MAX_BYTES: usize = 1024 * 1024; // 1 MiB
 
+#[derive(Default)]
 pub struct EncodedCache {
-    max_bytes: usize,
+    map:         Xxh3HashMap<Hash, Vec<u8>>,
+    order:       VecDeque<Hash>,
     total_bytes: usize,
-    entries: VecDeque<(Hash, Vec<u8>)>,
-}
-
-impl Default for EncodedCache {
-    fn default() -> Self {
-        Self {
-            max_bytes: CACHE_MAX_BYTES,
-            total_bytes: 0,
-            entries: VecDeque::new(),
-        }
-    }
 }
 
 impl EncodedCache {
@@ -26,29 +15,32 @@ impl EncodedCache {
     #[inline]
     #[must_use]
     pub fn get(&self, hash: &Hash) -> Option<&[u8]> {
-        self.entries
-            .iter()
-            .find(|(h, _)| h == hash)
-            .map(|(_, v)| v.as_slice())
+        self.map.get(hash).map(|v| v.as_slice())
     }
 
-    /// Get encoded bytes by hash, if present. Reference is valid until the next mutating call.
     #[inline]
     #[must_use]
     pub fn contains(&self, hash: &Hash) -> bool {
-        self.get(hash).is_some()
+        self.map.contains_key(hash)
     }
 
     /// Insert encoded bytes. Evicts oldest entries until total size <= `max_bytes`.
     #[inline]
     pub fn insert(&mut self, hash: Hash, data: Vec<u8>) {
-        let len = data.len();
-        self.total_bytes += len;
-        self.entries.push_back((hash, data));
+        if self.map.contains_key(&hash) {
+            return;
+        }
 
-        while self.total_bytes > self.max_bytes {
-            if let Some((_, evicted)) = self.entries.pop_front() {
-                self.total_bytes = self.total_bytes.saturating_sub(evicted.len());
+        self.total_bytes += data.len();
+
+        self.map.insert(hash, data);
+        self.order.push_back(hash);
+
+        while self.total_bytes > CACHE_MAX_BYTES {
+            if let Some(evicted_hash) = self.order.pop_front() {
+                if let Some(evicted) = self.map.remove(&evicted_hash) {
+                    self.total_bytes = self.total_bytes.saturating_sub(evicted.len());
+                }
             } else {
                 break;
             }
