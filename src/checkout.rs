@@ -13,8 +13,8 @@ pub fn checkout(repo: &mut Repository, branch: &str) -> Result<()> {
 
     if branch_path.exists() {
         let hash = repo.read_ref(&branch_ref)?;
-        let obj = repo.read_object(&hash)?;
-        let commit_id = obj.try_as_commit_id()?;
+        let object = repo.read_object(&hash)?;
+        let commit_id = object.try_as_commit_id()?;
 
         std::fs::write(
             repo.root.join(".mog/HEAD"),
@@ -45,10 +45,10 @@ pub fn checkout(repo: &mut Repository, branch: &str) -> Result<()> {
 pub fn checkout_path(repo: &mut Repository, target: &str, path: &str) -> Result<()> {
     let (_commit_hash, commit_id) = repo.resolve_to_commit(target)?;
     let tree_hash = repo.commit.get_tree(commit_id);
-    let (obj, obj_hash) = repo.walk_tree_path(&tree_hash, path)?;
+    let (object, obj_hash) = repo.walk_tree_path(&tree_hash, path)?;
     let mut index = Index::load(&repo.root)?;
 
-    match obj {
+    match object {
         Object::Blob(blob_id) => {
             checkout_blob_to(repo, blob_id, path)?;
             let abs = repo.root.join(path);

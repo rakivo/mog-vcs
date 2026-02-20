@@ -110,8 +110,8 @@ fn flatten_head_tree(repo: &mut Repository, tree_hash: Hash) -> Result<HeadTreeF
     let mut path_offsets = Vec::new();
     let mut hashes = Vec::new();
 
-    let obj = repo.read_object(&tree_hash)?;
-    let root_id = obj.try_as_tree_id()?;
+    let object = repo.read_object(&tree_hash)?;
+    let root_id = object.try_as_tree_id()?;
     let mut stack = vec![Frame {
         tree_id: root_id,
         prefix: Box::default(),

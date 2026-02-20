@@ -210,8 +210,8 @@ target/\n\
             hex_to_hash(target)?
         };
 
-        let obj = self.read_object(&hash)?;
-        let commit_id = obj.try_as_commit_id()?;
+        let object = self.read_object(&hash)?;
+        let commit_id = object.try_as_commit_id()?;
         Ok((hash, commit_id))
     }
 
@@ -240,8 +240,8 @@ target/\n\
 
     /// Walk tree at `tree_hash` following path; return (Object, `entry_hash`).
     pub fn walk_tree_path(&mut self, tree_hash: &Hash, path: &str) -> Result<(Object, Hash)> {
-        let obj = self.read_object(tree_hash)?;
-        let mut current_id = obj.try_as_tree_id()?;
+        let object = self.read_object(tree_hash)?;
+        let mut current_id = object.try_as_tree_id()?;
 
         let components = path
             .trim_matches('/')
@@ -258,8 +258,8 @@ target/\n\
                 .find_entry(current_id, component)
                 .ok_or_else(|| anyhow::anyhow!("path not found: '{component}'"))?;
 
-            let obj = self.read_object(&hash)?;
-            current_id = obj.try_as_tree_id()?;
+            let object = self.read_object(&hash)?;
+            current_id = object.try_as_tree_id()?;
         }
 
         let last = components[components.len() - 1];
@@ -267,7 +267,7 @@ target/\n\
             .find_entry(current_id, last)
             .ok_or_else(|| anyhow::anyhow!("path not found: '{last}'"))?;
 
-        let obj = self.read_object(&hash)?;
-        Ok((obj, hash))
+        let object = self.read_object(&hash)?;
+        Ok((object, hash))
     }
 }

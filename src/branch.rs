@@ -69,8 +69,8 @@ pub fn create(repo: &mut Repository, name: &str, target: Option<&str>) -> Result
         None => repo.read_head_commit()?,
     };
 
-    let obj = repo.read_object(&hash)?;
-    obj.try_as_commit_id().map_err(|_| anyhow::anyhow!("target does not resolve to a commit"))?;
+    let object = repo.read_object(&hash)?;
+    object.try_as_commit_id().map_err(|_| anyhow::anyhow!("target does not resolve to a commit"))?;
 
     repo.write_ref(&format!("refs/heads/{name}"), &hash)?;
     println!("created branch '{name}' at {}", &hash_to_hex(&hash)[..8]);

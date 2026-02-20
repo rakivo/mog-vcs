@@ -10,8 +10,8 @@ pub fn log(repo: &mut Repository, f: &mut dyn core::fmt::Write) -> Result<()> {
     };
 
     loop {
-        let obj = repo.read_object(&current)?;
-        let Ok(commit_id) = obj.try_as_commit_id() else {
+        let object = repo.read_object(&current)?;
+        let Ok(commit_id) = object.try_as_commit_id() else {
             continue;
         };
 
