@@ -1,4 +1,4 @@
-use crate::{hash::Hash, store::{BlobId, CommitId, TreeId}, tree::{TreeEntry, TreeEntryRef, TreePayloadOwned}, util::str_from_utf8_data_shouldve_been_valid_or_we_got_hacked, wire::{Decode, ReadCursor}};
+use crate::{hash::Hash, store::{BlobId, BlobStore, CommitId, Stores, TreeId}, tree::{TreeEntry, TreePayloadOwned}, wire::{Decode, ReadCursor}};
 
 use anyhow::{bail, Result};
 
@@ -71,6 +71,15 @@ impl ObjectTag {
     }
 }
 
+/// Hash of object encoded from stores.
+#[inline]
+#[must_use]
+pub fn hash_object(object: Object, stores: &Stores) -> Hash {
+    let mut buf = Vec::new();
+    stores.encode_object_into(object, &mut buf);
+    blake3::hash(&buf).into()
+}
+
 /// Encode raw bytes as on-disk blob (VX01 + type + len + data).
 #[inline]
 pub fn encode_blob_into(data: &[u8], buf: &mut Vec<u8>) {
@@ -80,6 +89,18 @@ pub fn encode_blob_into(data: &[u8], buf: &mut Vec<u8>) {
     buf.push(ObjectTag::Blob.as_byte());
     buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
     buf.extend_from_slice(data);
+}
+
+#[inline]
+pub fn encode_blob_and_hash(data: &[u8], buf: &mut Vec<u8>) -> Hash {
+    encode_blob_into(data, buf);
+    blake3::hash(buf).into()
+}
+
+#[inline]
+pub fn encode_blob_id_and_hash(store: &BlobStore, id: BlobId, buf: &mut Vec<u8>) -> Hash {
+    encode_blob_into(store.get(id), buf);
+    blake3::hash(buf).into()
 }
 
 #[inline]
@@ -118,82 +139,4 @@ pub fn decode_tree_entries(data: &[u8]) -> Result<Box<[TreeEntry]>> {
     let mut r = ReadCursor::new(&data[5..]);
     let p = TreePayloadOwned::decode(&mut r)?;
     Ok(p.entries)
-}
-
-#[derive(Debug, Clone)]
-pub struct Tree {
-    pub modes:        Box<[u32]>,
-    pub hashes:       Box<[Hash]>,
-    pub name_offsets: Box<[u32]>,
-    pub names_blob:   Box<[u8]>,
-}
-
-pub struct TreeIterator<'tree> {
-    pub tree: &'tree Tree,
-    pub index: usize
-}
-
-impl<'tree> Iterator for TreeIterator<'tree> {
-    type Item = TreeEntryRef<'tree>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.tree.count() {
-            return None;
-        }
-
-        let e = TreeEntryRef {
-            mode: self.tree.modes[self.index],
-            hash: self.tree.hashes[self.index],
-            name: self.tree.get_name(self.index)
-        };
-
-        self.index += 1;
-
-        Some(e)
-    }
-}
-
-impl<'tree> IntoIterator for &'tree Tree {
-    type Item = TreeEntryRef<'tree>;
-    type IntoIter = TreeIterator<'tree>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        TreeIterator { tree: self, index: 0 }
-    }
-}
-
-impl Tree {
-    #[inline]
-    #[must_use]
-    pub fn iter(&self) -> TreeIterator<'_> {
-        TreeIterator { tree: self, index: 0 }
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn count(&self) -> usize {
-        self.modes.len()
-    }
-
-    // Find a named entry in a tree, returning its hash
-    #[inline]
-    #[must_use]
-    pub fn find_in_tree<'a>(&'a self, name: &str) -> Option<Hash> {
-        self.into_iter()
-            .find(|entry| entry.name == name)
-            .map(|entry| entry.hash)
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn get_name(&self, index: usize) -> &str {
-        let start = self.name_offsets[index] as usize;
-        let end = if index + 1 < self.count() {
-            self.name_offsets[index + 1] as usize
-        } else {
-            self.names_blob.len()
-        };
-
-        str_from_utf8_data_shouldve_been_valid_or_we_got_hacked(&self.names_blob[start..end])
-    }
 }

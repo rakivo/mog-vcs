@@ -95,7 +95,9 @@ fn main() -> Result<()> {
 
         Commands::CatFile { hash } => {
             let mut repo = Repository::open(&PathBuf::from("."))?;
-            mog::cat_file::cat_file(&mut repo, &hash)?;
+            let mut buf = String::new();
+            mog::cat_file::cat_file(&mut repo, &hash, &mut buf)?;
+            println!("{buf}");
         }
 
         Commands::WriteTree => {

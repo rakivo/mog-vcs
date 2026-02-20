@@ -1,5 +1,3 @@
-// Status: DOD. Flat HEAD tree, parallel path/hash arrays, single pass over index + working tree.
-
 use crate::hash::Hash;
 use crate::ignore::Ignore;
 use crate::index::Index;
@@ -121,6 +119,7 @@ fn flatten_head_tree(repo: &mut Repository, tree_hash: Hash) -> Result<HeadTreeF
 
     while let Some(frame) = stack.pop() {
         let n = repo.tree.entry_count(frame.tree_id);
+
         for j in 0..n {
             let TreeEntryRef { mode, hash, name } = repo.tree.get_entry_ref(frame.tree_id, j);
 

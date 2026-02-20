@@ -1,8 +1,8 @@
 use crate::cache::EncodedCache;
 use crate::ignore::Ignore;
 use crate::storage::Storage;
-use crate::object::Object;
-use crate::store::{decode_object_into_stores, encode_object_into, object_hash, CommitId, Stores};
+use crate::object::{encode_blob_and_hash, hash_object, Object};
+use crate::store::{CommitId, Stores};
 use crate::hash::{Hash, hash_to_hex, hex_to_hash};
 use crate::tree::TreeEntry;
 use crate::util::Xxh3HashSet;
@@ -22,10 +22,12 @@ pub struct Repository {
 
 impl Deref for Repository {
     type Target = Stores;
+    #[inline]
     fn deref(&self) -> &Self::Target { &self.stores }
 }
 
 impl DerefMut for Repository {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target { &mut self.stores }
 }
 
@@ -49,7 +51,8 @@ impl Repository {
         if !mogged.exists() {
             std::fs::write(
                 &mogged,
-                "# .mogged: ignore rules (repo-root-relative)\n\
+                "\
+# .mogged: ignore rules (repo-root-relative)\n\
 # Lines ending with / ignore a directory prefix.\n\
 # * and ? are supported.\n\
 \n\
@@ -93,16 +96,10 @@ target/\n\
     #[inline]
     pub fn read_object(&mut self, hash: &Hash) -> Result<Object> {
         if let Some(cached) = self.object_cache.get(hash) {
-            return decode_object_into_stores(
-                cached,
-                &mut self.stores,
-            );
+            return self.stores.decode_and_push_object(cached);
         }
         let data = self.storage.read(hash)?;
-        let object = decode_object_into_stores(
-            &data,
-            &mut self.stores
-        )?;
+        let object = self.stores.decode_and_push_object(data)?;
         self.object_cache.insert(*hash, data.to_vec()); // @Clone
         Ok(object)
     }
@@ -132,13 +129,21 @@ target/\n\
     /// Encode from stores, hash, push to storage. Returns hash.
     #[inline]
     pub fn write_object(&mut self, object: Object) -> Hash {
-        let hash = object_hash(object, &self.stores);
+        let hash = hash_object(object, &self.stores);
 
         let mut buf = Vec::new();
-        encode_object_into(object, &self.stores, &mut buf);
+        self.encode_object_into(object, &mut buf);
 
         self.storage.write(hash, buf);
 
+        hash
+    }
+
+    #[inline]
+    pub fn write_blob(&mut self, data: &[u8]) -> Hash {
+        let mut buf = Vec::new();
+        let hash = encode_blob_and_hash(data, &mut buf);
+        self.storage.write(hash, buf);
         hash
     }
 
@@ -195,6 +200,7 @@ target/\n\
     }
 
     /// Resolve branch or hex to (`commit_hash`, `CommitId`).
+    #[inline]
     pub fn resolve_to_commit(&mut self, target: &str) -> Result<(Hash, CommitId)> {
         let branch_ref = format!("refs/heads/{target}");
         let branch_path = self.root.join(".mog").join(&branch_ref);
@@ -211,6 +217,7 @@ target/\n\
     }
 
     /// Walk commit graph from start, collecting reachable hashes.
+    #[inline]
     pub fn reachable_commits(&mut self, start: &Hash) -> Xxh3HashSet<Hash> {
         let mut visited = Xxh3HashSet::default();
         let mut stack = vec![*start];
@@ -219,6 +226,7 @@ target/\n\
             if visited.contains(&hash) {
                 continue;
             }
+
             visited.insert(hash);
 
             if let Ok(obj) = self.read_object(&hash) {

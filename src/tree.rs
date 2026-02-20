@@ -129,3 +129,82 @@ impl Encode for TreePayloadView<'_> {
         }
     }
 }
+
+
+#[derive(Debug, Clone)]
+pub struct Tree {
+    pub modes:        Box<[u32]>,
+    pub hashes:       Box<[Hash]>,
+    pub name_offsets: Box<[u32]>,
+    pub names_blob:   Box<[u8]>,
+}
+
+pub struct TreeIterator<'tree> {
+    pub tree: &'tree Tree,
+    pub index: usize
+}
+
+impl<'tree> Iterator for TreeIterator<'tree> {
+    type Item = TreeEntryRef<'tree>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.tree.count() {
+            return None;
+        }
+
+        let e = TreeEntryRef {
+            mode: self.tree.modes[self.index],
+            hash: self.tree.hashes[self.index],
+            name: self.tree.get_name(self.index)
+        };
+
+        self.index += 1;
+
+        Some(e)
+    }
+}
+
+impl<'tree> IntoIterator for &'tree Tree {
+    type Item = TreeEntryRef<'tree>;
+    type IntoIter = TreeIterator<'tree>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        TreeIterator { tree: self, index: 0 }
+    }
+}
+
+impl Tree {
+    #[inline]
+    #[must_use]
+    pub fn iter(&self) -> TreeIterator<'_> {
+        TreeIterator { tree: self, index: 0 }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.modes.len()
+    }
+
+    // Find a named entry in a tree, returning its hash
+    #[inline]
+    #[must_use]
+    pub fn find_in_tree<'a>(&'a self, name: &str) -> Option<Hash> {
+        self.into_iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.hash)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn get_name(&self, index: usize) -> &str {
+        let start = self.name_offsets[index] as usize;
+        let end = if index + 1 < self.count() {
+            self.name_offsets[index + 1] as usize
+        } else {
+            self.names_blob.len()
+        };
+
+        str_from_utf8_data_shouldve_been_valid_or_we_got_hacked(&self.names_blob[start..end])
+    }
+}

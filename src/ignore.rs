@@ -1,8 +1,8 @@
+use crate::tracy;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-
-use crate::tracy;
 
 /// Data-oriented ignore matcher loaded from `.mogged`.
 ///

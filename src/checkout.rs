@@ -100,7 +100,7 @@ pub fn checkout_tree_impl(
 ) -> Result<()> {
     struct Frame {
         tree_hash: Hash,
-        prefix:  Box<str>,
+        prefix: Box<str>,
     }
 
     let mut stack = vec![Frame { tree_hash, prefix: prefix.clone().into() }];
@@ -122,7 +122,7 @@ pub fn checkout_tree_impl(
 
             if mode == MODE_DIR {
                 //
-                // Tree: read into store (small, no blob data) and recurse.
+                // Tree: read into store and recurse.
                 //
                 std::fs::create_dir_all(repo.root.join(child_path.as_ref()))?;
                 stack.push(Frame { tree_hash: hash, prefix: child_path });

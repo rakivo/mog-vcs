@@ -1,10 +1,12 @@
-use std::path::PathBuf;
-use anyhow::{Result, bail};
 use crate::{
     hash::{hash_to_hex, hex_to_hash},
     repository::Repository,
     util::Xxh3HashSet,
 };
+
+use std::path::PathBuf;
+
+use anyhow::{Result, bail};
 
 #[inline]
 fn branch_path(repo: &Repository, name: &str) -> PathBuf {
@@ -98,6 +100,7 @@ pub fn delete(repo: &mut Repository, name: &str) -> Result<()> {
         .filter(|b| b != name)
         .filter_map(|b| repo.read_ref(&format!("refs/heads/{b}")).ok())
         .collect::<Vec<_>>();
+
     let mut other_reachable = Xxh3HashSet::default();
     for h in other_heads {
         other_reachable.extend(repo.reachable_commits(&h));

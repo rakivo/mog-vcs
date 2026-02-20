@@ -1,9 +1,10 @@
-// src/storage.rs
 use crate::hash::Hash;
 use crate::tracy;
-use anyhow::{Result, bail};
+
 use std::path::Path;
 use std::fs::{File, OpenOptions};
+
+use anyhow::{Result, bail};
 use memmap2::{MmapMut, MmapOptions};
 use libc::{madvise, MADV_DONTNEED, MADV_SEQUENTIAL, MADV_WILLNEED};
 
@@ -33,8 +34,6 @@ pub struct Storage {
 
 impl Drop for Storage {
     fn drop(&mut self) {
-        // Best-effort: flush any pending writes and sync.
-        // Ignore errors here; they will have been reported at call sites.
         _ = self.flush();
     }
 }
@@ -60,7 +59,6 @@ impl Storage {
             .truncate(true)
             .open(path)?;
 
-        // Pre-allocate header + hash table
         let initial_size = HEADER_SIZE + HASH_TABLE_SIZE;
         file.set_len(initial_size as u64)?;
 
@@ -74,7 +72,7 @@ impl Storage {
             );
         }
 
-        // Write header directly into mmap
+        // Write header
         mmap[0..4].copy_from_slice(MAGIC);
         mmap[4..8].copy_from_slice(&VERSION.to_le_bytes());
         mmap[8..16].copy_from_slice(&0u64.to_le_bytes());  // count

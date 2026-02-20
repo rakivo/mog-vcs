@@ -5,7 +5,7 @@ use crate::object::Object;
 use crate::store::TreeId;
 use crate::tree::TreeEntry;
 use crate::tracy;
-use crate::util::{str_from_utf8_data_shouldve_been_valid_or_we_got_hacked, Xxh3HashMap};
+use crate::util::{is_executable, str_from_utf8_data_shouldve_been_valid_or_we_got_hacked, Xxh3HashMap};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -495,7 +495,7 @@ fn build_tree(
     modes:  &[u32],
     hashes: &[Hash],
     dir:    &str,         // current directory prefix e.g. "src/foo"
-    start:  usize,        // where in the slice we are
+    start:  usize,        // where in the `paths` we are
 ) -> Result<(Hash, usize)> {
     struct Frame<'a> {
         /// Directory prefix (repo-relative, no leading slash), e.g. "src/foo". Root is "".
@@ -507,13 +507,12 @@ fn build_tree(
         tree_entries_buffer: Vec<TreeEntry>
     }
 
-    let mut stack: Vec<Frame<'_>> = Vec::new();
-    stack.push(Frame {
+    let mut stack = vec![Frame {
         dir,
         start,
         name_in_parent: None,
         tree_entries_buffer: Vec::new()
-    });
+    }];
 
     let mut i = start;
 
@@ -536,7 +535,7 @@ fn build_tree(
         if finish_now {
             let done = stack.pop().expect("non-empty stack");
 
-            let tree_id = repo.tree.extend(&done.tree_entries_buffer);
+            let tree_id = repo.tree.push(&done.tree_entries_buffer);
             let hash = repo.write_object(Object::Tree(tree_id));
             let consumed = i - done.start;
 
@@ -602,15 +601,4 @@ fn build_tree(
             }
         }
     }
-}
-
-#[cfg(unix)]
-fn is_executable(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn is_executable(_: &fs::Metadata) -> bool {
-    false
 }

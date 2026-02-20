@@ -2,8 +2,7 @@ use std::path::Path;
 use std::fs;
 use anyhow::Result;
 use crate::repository::Repository;
-use crate::object::Object;
-use crate::store::blob_encode_and_hash;
+use crate::object::{Object, encode_blob_id_and_hash};
 use crate::hash::hash_to_hex;
 
 pub fn hash_object(repo: &mut Repository, path: &Path, write: bool) -> Result<()> {
@@ -17,7 +16,7 @@ pub fn hash_object(repo: &mut Repository, path: &Path, write: bool) -> Result<()
         hash
     } else {
         let mut buf = Vec::new();
-        blob_encode_and_hash(&repo.blob, blob_id, &mut buf)
+        encode_blob_id_and_hash(&repo.blob, blob_id, &mut buf)
     };
 
     println!("{}", hash_to_hex(&hash));

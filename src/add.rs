@@ -145,9 +145,9 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
         //
         // Build encoded_buf and flush.
         //
-        let mut encoded_buf  = Vec::new();
-        let mut file_infos   = Vec::<FileInfo>::new();
-        let mut file_metas   = Vec::<&FileMeta>::new();
+        let mut encoded_buf = Vec::new();
+        let mut file_infos  = Vec::<FileInfo>::new();
+        let mut file_metas  = Vec::<&FileMeta>::new();
 
         for ProcessedFile { file_meta, encoded, hash } in processed {
             let offset = encoded_buf.len() as u32;
@@ -174,7 +174,7 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
 
 //
 //
-// Shared pattern matching helpers.
+// Shared pattern matching helpers. (add and remove share some functions)
 //
 //
 
@@ -205,9 +205,9 @@ pub fn classify_patterns(
 
         let s = p.to_string_lossy();
         if Regex::new(&s).is_ok() {
-            regex_patterns.push(format!("(?:{})", s));
+            regex_patterns.push(format!("(?:{s})"));
         } else {
-            eprintln!("Invalid regex pattern '{}', skipping", s);
+            eprintln!("Invalid regex pattern '{s}', skipping");
         }
     }
 

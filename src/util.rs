@@ -31,6 +31,18 @@ pub fn stdout_is_tty() -> bool {
     std::io::stdout().is_terminal()
 }
 
+#[inline]
+pub fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))] {
+        false
+    }
+}
+
 #[macro_export]
 macro_rules! payload_triple {
     (

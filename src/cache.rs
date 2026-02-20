@@ -1,5 +1,5 @@
 use crate::{hash::Hash, util::Xxh3HashMap};
-use std::collections::{VecDeque, HashMap};
+use std::collections::VecDeque;
 
 const CACHE_MAX_BYTES: usize = 1024 * 1024; // 1 MiB
 
