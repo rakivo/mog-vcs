@@ -23,7 +23,7 @@ pub struct PendingStorageWrite {
     pub data: Box<[u8]>,
 }
 
-// TODO: Mock storage for tests
+// TODO(#2): Mock storage for tests
 pub struct Storage {
     file: File,
     mmap: MmapMut,
