@@ -21,9 +21,9 @@ const STAGE_MAX_FILE_BYTES:  usize = 1024 * 1024;
 pub fn stage(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
     let _span = tracy::span!("stage");
 
-    let staged_successfully       = AtomicUsize::new(0); // @Metric
-    let bytes_staged_successfully = AtomicUsize::new(0); // @Metric
-    let refused_over_limit        = AtomicUsize::new(0); // @Metric
+    let staged_successfully        = AtomicUsize::new(0); // @Metric
+    let bytes_staged_successfully  = AtomicUsize::new(0); // @Metric
+    let mut refused_over_limit     = 0; // @Metric
 
     let current_dir = std::env::current_dir()?;
     let mut index   = Index::load(&repo.root)?;
@@ -68,7 +68,7 @@ pub fn stage(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
         };
 
         if metadata.len() > STAGE_MAX_FILE_BYTES as u64 {
-            refused_over_limit.fetch_add(1, Ordering::Relaxed);
+            refused_over_limit += 1;
             continue;
         }
 
@@ -85,12 +85,32 @@ pub fn stage(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
         });
     }
 
-    if refused_over_limit.load(Ordering::Relaxed) > 0 {
+    if refused_over_limit > 0 {
         eprintln!(
             "Refused to stage {refused_over_limit} file(s) over 1 MiB (max {STAGE_MAX_FILE_BYTES} bytes)",
-            refused_over_limit = refused_over_limit.load(Ordering::Relaxed)
         );
     }
+
+    //
+    //
+    // Stage removes
+    //
+    //
+
+    let removed_successfully = {
+        let mut to_remove = Vec::new();
+        for i in 0..index.count {
+            let abs = repo.root.join(index.get_path(i));
+            if !abs.exists() {
+                to_remove.push(index.get_path(i).to_owned());
+            }
+        }
+        for path in &to_remove {
+            index.remove(path);
+        }
+
+        to_remove.len()
+    };
 
     //
     //
@@ -163,11 +183,15 @@ pub fn stage(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
     repo.storage.sync()?;
     index.save(&repo.root)?;
 
-    println!(
-        "Staged {staged_successfully} file(s), {bytes_staged_successfully} in byte(s)",
-        staged_successfully = staged_successfully.load(Ordering::Relaxed),
-        bytes_staged_successfully = bytes_staged_successfully.load(Ordering::Relaxed),
-    );
+    let staged_successfully = staged_successfully.load(Ordering::Relaxed);
+    if staged_successfully > 0 || removed_successfully > 0 {
+        println!(
+            "Staged {staged_successfully} file(s), {removes} remove(s), {bytes_staged_successfully} in byte(s)",
+            staged_successfully = staged_successfully,
+            removes = removed_successfully,
+            bytes_staged_successfully = bytes_staged_successfully.load(Ordering::Relaxed),
+        );
+    }
 
     Ok(())
 }
