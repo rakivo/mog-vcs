@@ -28,11 +28,17 @@ enum Commands {
     },
     WriteTree,
     Log,
-    Add {
+    /// Add paths to the index (stage)
+    Stage {
         files: Vec<PathBuf>,
     },
     /// Remove paths from the index (unstage)
-    Remove {
+    Unstage {
+        files: Vec<PathBuf>,
+    },
+    /// Discard working directory changes, restoring to index state.
+    Discard {
+        /// Paths to discard (omit to discard everything).
         files: Vec<PathBuf>,
     },
     Checkout {
@@ -126,6 +132,11 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Discard { files } => {
+            let mut repo = Repository::open(".")?;
+            mog::discard::discard(&mut repo, &files)?;
+        }
+
         Commands::Branch { name, at, delete, force_delete, rename_to } => {
             let mut repo = Repository::open(".")?;
 
@@ -142,14 +153,14 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Add { files } => {
+        Commands::Stage { files } => {
             let mut repo = Repository::open(".")?;
-            mog::add::add(&mut repo, &files)?;
+            mog::stage::stage(&mut repo, &files)?;
         }
 
-        Commands::Remove { files } => {
+        Commands::Unstage { files } => {
             let mut repo = Repository::open(".")?;
-            mog::remove::remove(&mut repo, &files)?;
+            mog::unstage::unstage(&mut repo, &files)?;
         }
 
         Commands::Status => {

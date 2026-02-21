@@ -15,15 +15,15 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 use regex::Regex;
 
-const ADD_BATCH_MAX_BYTES: usize = 1024 * 1024;
-const ADD_MAX_FILE_BYTES:  usize = 1024 * 1024;
+const STAGE_BATCH_MAX_BYTES: usize = 1024 * 1024;
+const STAGE_MAX_FILE_BYTES:  usize = 1024 * 1024;
 
-pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
-    let _span = tracy::span!("add");
+pub fn stage(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
+    let _span = tracy::span!("stage");
 
-    let added_successfully       = AtomicUsize::new(0); // @Metric
-    let bytes_added_successfully = AtomicUsize::new(0); // @Metric
-    let refused_over_limit       = AtomicUsize::new(0); // @Metric
+    let staged_successfully       = AtomicUsize::new(0); // @Metric
+    let bytes_staged_successfully = AtomicUsize::new(0); // @Metric
+    let refused_over_limit        = AtomicUsize::new(0); // @Metric
 
     let current_dir = std::env::current_dir()?;
     let mut index   = Index::load(&repo.root)?;
@@ -44,7 +44,7 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
     //
     //
 
-    let files_to_add = walk_matching(&repo.root, &repo.ignore, &literal_roots, combined_re.as_ref());
+    let files_to_stage = walk_matching(&repo.root, &repo.ignore, &literal_roots, combined_re.as_ref());
 
     //
     //
@@ -54,7 +54,7 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
 
     let mut files_to_process = Vec::<FileMeta>::new();
 
-    for (path, rel_norm_string) in files_to_add {
+    for (path, rel_norm_string) in files_to_stage {
         if repo.ignore.is_ignored_rel(&rel_norm_string) {
             continue;
         }
@@ -67,7 +67,7 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
             }
         };
 
-        if metadata.len() > ADD_MAX_FILE_BYTES as u64 {
+        if metadata.len() > STAGE_MAX_FILE_BYTES as u64 {
             refused_over_limit.fetch_add(1, Ordering::Relaxed);
             continue;
         }
@@ -87,7 +87,7 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
 
     if refused_over_limit.load(Ordering::Relaxed) > 0 {
         eprintln!(
-            "Refused to add {refused_over_limit} file(s) over 1 MiB (max {ADD_MAX_FILE_BYTES} bytes)",
+            "Refused to stage {refused_over_limit} file(s) over 1 MiB (max {STAGE_MAX_FILE_BYTES} bytes)",
             refused_over_limit = refused_over_limit.load(Ordering::Relaxed)
         );
     }
@@ -103,7 +103,7 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
 
     for file in &files_to_process {
         let size = file.meta.len() as usize;
-        if current_batch_bytes + size > ADD_BATCH_MAX_BYTES && !batches.last().unwrap().is_empty() {
+        if current_batch_bytes + size > STAGE_BATCH_MAX_BYTES && !batches.last().unwrap().is_empty() {
             batches.push(Vec::new());
             current_batch_bytes = 0;
         }
@@ -128,12 +128,12 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
             let mut encoded = Vec::new();
             encode_blob_into(&data, &mut encoded);
             let hash = {
-                let _span = tracy::span!("add::hash");
+                let _span = tracy::span!("stage::hash");
                 Hash::from(blake3::hash(&encoded))
             };
 
-            added_successfully.fetch_add(1, Ordering::Relaxed);
-            bytes_added_successfully.fetch_add(data.len(), Ordering::Relaxed);
+            staged_successfully.fetch_add(1, Ordering::Relaxed);
+            bytes_staged_successfully.fetch_add(data.len(), Ordering::Relaxed);
 
             Some(ProcessedFile {
                 file_meta: file,
@@ -164,9 +164,9 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
     index.save(&repo.root)?;
 
     println!(
-        "Added {added_successfully} file(s), {bytes_added_successfully} in byte(s)",
-        added_successfully = added_successfully.load(Ordering::Relaxed),
-        bytes_added_successfully = bytes_added_successfully.load(Ordering::Relaxed),
+        "Staged {staged_successfully} file(s), {bytes_staged_successfully} in byte(s)",
+        staged_successfully = staged_successfully.load(Ordering::Relaxed),
+        bytes_staged_successfully = bytes_staged_successfully.load(Ordering::Relaxed),
     );
 
     Ok(())
@@ -174,11 +174,11 @@ pub fn add(repo: &mut Repository, paths: &[PathBuf]) -> Result<()> {
 
 //
 //
-// Shared pattern matching helpers. (add and remove share some functions)
+// Shared pattern matching helpers. (stage and unstage share some functions)
 //
 //
 
-#[must_use] 
+#[must_use]
 pub fn classify_patterns(
     patterns:      &[PathBuf],
     current_dir:   &Path,
@@ -226,7 +226,7 @@ pub fn classify_patterns(
 
 /// Walk repo, returning (`abs_path`, `rel_norm_string`) for every non-ignored file
 /// that matches `literal_roots` or `combined_re`.
-#[must_use] 
+#[must_use]
 pub fn walk_matching(
     repo_root:    &Path,
     ignore:       &Ignore,
@@ -288,7 +288,7 @@ fn flush_batch(
         return Ok(());
     }
 
-    let _span = tracy::span!("add::flush");
+    let _span = tracy::span!("stage::flush");
 
     let hash_and_data_iter = file_infos.iter().map(|FileInfo { hash, offset, len }| {
         (*hash, &encoded_buf[*offset as usize..*offset as usize + *len as usize])
