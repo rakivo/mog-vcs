@@ -10,7 +10,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-// TODO: Names for stashes
+// TODO(#3): Names for stashes
 
 pub fn stash(repo: &mut Repository) -> Result<()> {
     let index = Index::load(&repo.root)?;
