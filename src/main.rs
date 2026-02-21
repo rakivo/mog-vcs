@@ -21,14 +21,14 @@ enum StashAction {
     Pop,
     /// List all stash entries.
     List,
-    // TODO: Default stash index `StashAction::Drop` to the latest stash
+
+    // TODO(#1): Default stash index `StashAction::Drop` to the latest stash
+
     /// Same as Pop but doesn't remove the stash.
     Apply { index: Option<usize> },
     /// Just removes the stash.
     Drop { index: Option<usize> },
 }
-
-// TODO: Subcommand to unstage all removed files.
 
 #[derive(Subcommand)]
 enum Commands {
