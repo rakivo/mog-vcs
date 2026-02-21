@@ -8,6 +8,26 @@ use anyhow::{Result, bail};
 use memmap2::{MmapMut, MmapOptions};
 use libc::{madvise, MADV_DONTNEED, MADV_SEQUENTIAL, MADV_WILLNEED};
 
+pub trait MogStorage {
+    fn exists(&self, hash: &Hash) -> bool;
+    fn read<'a>(&'a self, hash: &Hash) -> Result<&'a [u8]>;
+    fn write(&mut self, hash: Hash, data: impl Into<Box<[u8]>>);
+    fn write_batch<'a>(&mut self, writes: impl Iterator<Item = (Hash, &'a [u8])>) -> Result<()>;
+    fn flush(&mut self) -> Result<()>;
+    fn sync(&mut self) -> Result<()>;
+    fn evict_pages(&self, data: &[u8]);
+}
+
+impl MogStorage for Storage {
+    fn exists(&self, hash: &Hash) -> bool { self.exists(hash) }
+    fn read<'a>(&'a self, hash: &Hash) -> Result<&'a [u8]> { self.read(hash) }
+    fn write(&mut self, hash: Hash, data: impl Into<Box<[u8]>>) { self.write(hash, data) }
+    fn write_batch<'a>(&mut self, writes: impl Iterator<Item = (Hash, &'a [u8])>) -> Result<()> { self.write_batch(writes) }
+    fn flush(&mut self) -> Result<()> { self.flush() }
+    fn sync(&mut self) -> Result<()> { self.sync() }
+    fn evict_pages(&self, _data: &[u8]) {}
+}
+
 const MAGIC: &[u8; 4] = b"MOGS";
 const VERSION: u32 = 1;
 

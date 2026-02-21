@@ -1,37 +1,38 @@
 use crate::cache::ObjectCache;
 use crate::ignore::Ignore;
-use crate::storage::Storage;
+use crate::storage::{MogStorage, Storage};
 use crate::object::{encode_blob_and_hash, hash_object, Object};
+use crate::storage_mock::MockStorage;
 use crate::store::{CommitId, Stores};
 use crate::hash::{Hash, hash_to_hex, hex_to_hash};
 use crate::tree::TreeEntry;
 use crate::util::Xxh3HashSet;
 
 use std::ops::{Deref, DerefMut};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-pub struct Repository {
+pub struct Repository<S: MogStorage = Storage> {
     pub root: Box<Path>,
-    pub storage: Storage,
+    pub storage: S,
     pub ignore: Ignore,
     pub object_cache: ObjectCache,
     pub stores: Stores
 }
 
-impl Deref for Repository {
+impl<S: MogStorage> Deref for Repository<S> {
     type Target = Stores;
     #[inline]
     fn deref(&self) -> &Self::Target { &self.stores }
 }
 
-impl DerefMut for Repository {
+impl<S: MogStorage> DerefMut for Repository<S> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target { &mut self.stores }
 }
 
-impl Repository {
+impl Repository<Storage> {
     #[inline]
     pub fn init(path: &Path) -> Result<Self> {
         let mog_dir = path.join(".mog");
@@ -91,7 +92,23 @@ target/\n\
             stores: Stores::default()
         })
     }
+}
 
+impl Repository<MockStorage> {
+    #[inline]
+    #[must_use]
+    pub fn new_mock() -> Self {
+        Self {
+            root:         PathBuf::from("/mock").into(),
+            storage:      MockStorage::new(),
+            ignore:       Ignore::empty(),
+            object_cache: ObjectCache::default(),
+            stores:       Stores::default(),
+        }
+    }
+}
+
+impl<S: MogStorage> Repository<S> {
     #[inline]
     pub fn read_object(&mut self, hash: &Hash) -> Result<Object> {
         if let Some(cached) = self.object_cache.get(hash) {

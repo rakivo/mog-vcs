@@ -89,6 +89,17 @@ impl Ignore {
 
     #[inline]
     #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            root:     PathBuf::from("/mock"),
+            exact:    Vec::new(),
+            prefixes: Vec::new(),
+            globs:    Vec::new(),
+        }
+    }
+
+    #[inline]
+    #[must_use]
     pub fn is_ignored_abs(&self, abs: &Path) -> bool {
         let Ok(rel) = abs.strip_prefix(&self.root) else { return false };
         if rel.as_os_str().is_empty() {
