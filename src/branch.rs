@@ -100,7 +100,6 @@ pub fn delete(repo: &mut Repository, name: &str) -> Result<()> {
         .filter(|b| b != name)
         .filter_map(|b| repo.read_ref(&format!("refs/heads/{b}")).ok())
         .collect::<Vec<_>>();
-
     let mut other_reachable = Xxh3HashSet::default();
     for h in other_heads {
         other_reachable.extend(repo.reachable_commits(&h));

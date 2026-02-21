@@ -1,11 +1,13 @@
-use anyhow::Result;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::fs;
 use crate::repository::Repository;
 use crate::object::Object;
 use crate::store::{CommitId, CommitStore};
 use crate::hash::{Hash, hash_to_hex};
 use crate::wire::{Decode, Encode, ReadCursor, WriteCursor};
+
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::Result;
 
 pub fn commit(
     repo: &mut Repository,
@@ -18,19 +20,22 @@ pub fn commit(
         .duration_since(UNIX_EPOCH)?
         .as_secs() as i64;
 
-    let parents: Vec<Hash> = parent.into_iter().collect();
+    let parents = parent.into_iter().collect::<Vec<_>>();
     let commit_id = repo.commit.push(tree, &parents, timestamp, author, message);
     let hash = repo.write_object(Object::Commit(commit_id));
 
-    // Read HEAD to figure out where to write
     let head = fs::read_to_string(repo.root.join(".mog/HEAD"))?;
     let head = head.trim();
 
     if let Some(refpath) = head.strip_prefix("ref: ") {
+        //
         // Normal: update the branch HEAD points to
+        //
         repo.write_ref(refpath.trim(), &hash)?;
     } else {
+        //
         // Detached HEAD: update HEAD directly to new commit
+        //
         fs::write(
             repo.root.join(".mog/HEAD"),
             format!("{}\n", hash_to_hex(&hash))
@@ -41,7 +46,9 @@ pub fn commit(
 
     println!("Created commit {}", hash_to_hex(&hash));
 
+    //
     // Ensure commit (and any trees written along the way) are durably stored.
+    //
     repo.storage.flush()?;
     Ok(hash)
 }
@@ -101,14 +108,19 @@ impl CommitPayloadOwned {
 impl Decode for CommitPayloadOwned {
     fn decode(r: &mut ReadCursor<'_>) -> Result<Self> {
         let tree = r.read_hash()?;
+
         let parent_count = r.read_u32()? as usize;
         let mut parents = Vec::with_capacity(parent_count);
         for _ in 0..parent_count {
             parents.push(r.read_hash()?);
         }
+
         let timestamp = r.read_i64()?;
+
         let author = r.read_len_prefixed_str()?.into_owned();
+
         let message = r.read_len_prefixed_str()?.into_owned();
+
         Ok(CommitPayloadOwned::new(
             tree,
             parents.into_boxed_slice(),
@@ -129,12 +141,16 @@ impl<'a> CommitPayloadRef<'a> {
 impl Encode for CommitPayloadView<'_> {
     fn encode(&self, w: &mut WriteCursor<'_>) {
         w.write_hash(&self.tree);
+
         w.write_u32(self.parents.len() as u32);
         for p in self.parents {
             w.write_hash(p);
         }
+
         w.write_i64(self.timestamp);
+
         w.write_len_prefixed_str(self.author);
+
         w.write_len_prefixed_str(self.message);
     }
 }

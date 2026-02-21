@@ -92,7 +92,6 @@ impl HeadTreeFlat {
     }
 }
 
-/// Iterative stack walk: flatten tree to (path, hash) for blobs only. No recursion.
 fn flatten_head_tree(repo: &mut Repository, tree_hash: Hash) -> Result<HeadTreeFlat> {
     struct Frame {
         tree_id: TreeId,
@@ -186,7 +185,6 @@ pub struct StatusBuckets {
     pub untracked: Vec<Box<str>>,
 }
 
-/// Scan index (stat + compare to head), then walk dir for untracked.
 fn collect_status(
     index: &Index,
     head: &HeadTreeFlat,
@@ -245,7 +243,9 @@ fn collect_status(
         }
     }
 
-    // --- Staged deletes (in HEAD, not in index) ---
+    //
+    // Staged deletes (in HEAD, not in index)
+    //
     let mut staged_deleted = Vec::new();
     for j in 0..head.len() {
         let path_str = head.get_path(head.sorted_order[j]);
@@ -284,6 +284,30 @@ fn collect_status(
 }
 
 pub fn print_status(buckets: &StatusBuckets, out: &mut (impl std::io::Write + ?Sized)) -> std::io::Result<()> {
+    const GREEN:  &str = "\x1b[32m";
+    const RED:    &str = "\x1b[31m";
+    const YELLOW: &str = "\x1b[33m";
+    const BOLD:   &str = "\x1b[1m";
+    const RESET:  &str = "\x1b[0m";
+
+    fn section_header(f: &mut (impl std::io::Write + ?Sized), color: &str, title: &str) -> std::io::Result<()> {
+        if stdout_is_tty() {
+            writeln!(f, "  {color}{title}{RESET}")?;
+        } else {
+            writeln!(f, "  {title}")?;
+        }
+        Ok(())
+    }
+
+    fn path_line(f: &mut (impl std::io::Write + ?Sized), color: &str, path: &str) -> std::io::Result<()> {
+        if stdout_is_tty() {
+            writeln!(f, "    {color}{path}{RESET}")?;
+        } else {
+            writeln!(f, "    {path}")?;
+        }
+        Ok(())
+    }
+
     let has_staged = !buckets.staged_new_modified.is_empty() || !buckets.staged_deleted.is_empty();
     let has_working = !buckets.modified.is_empty() || !buckets.deleted.is_empty();
     let has_untracked = !buckets.untracked.is_empty();
@@ -330,37 +354,12 @@ pub fn print_status(buckets: &StatusBuckets, out: &mut (impl std::io::Write + ?S
         }
         if rest > 0 {
             if stdout_is_tty() {
-                writeln!(out, "    {}... and {} more untracked{}\n", YELLOW, rest, RESET)?;
+                writeln!(out, "    {YELLOW}... and {rest} more untracked{RESET}\n")?;
             } else {
-                writeln!(out, "    ... and {} more untracked\n", rest)?;
+                writeln!(out, "    ... and {rest} more untracked\n")?;
             }
         }
     }
 
-    Ok(())
-}
-
-
-const GREEN:  &str = "\x1b[32m";
-const RED:    &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
-const BOLD:  &str = "\x1b[1m";
-const RESET: &str = "\x1b[0m";
-
-fn section_header(f: &mut (impl std::io::Write + ?Sized), color: &str, title: &str) -> std::io::Result<()> {
-    if stdout_is_tty() {
-        writeln!(f, "  {}{}{}", color, title, RESET)?;
-    } else {
-        writeln!(f, "  {}", title)?;
-    }
-    Ok(())
-}
-
-fn path_line(f: &mut (impl std::io::Write + ?Sized), color: &str, path: &str) -> std::io::Result<()> {
-    if stdout_is_tty() {
-        writeln!(f, "    {}{}{}", color, path, RESET)?;
-    } else {
-        writeln!(f, "    {}", path)?;
-    }
     Ok(())
 }

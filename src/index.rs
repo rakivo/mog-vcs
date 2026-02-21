@@ -14,7 +14,7 @@ use std::fs;
 use anyhow::{Result, bail};
 use xxhash_rust::xxh3::xxh3_64;
 
-const INDEX_MAGIC: &[u8; 4] = b"MOGG";
+const INDEX_MAGIC: &[u8; 4] = b"MOGI";
 const INDEX_VERSION: u32 = 1;
 
 // On-disk binary layout:
@@ -131,6 +131,7 @@ impl Index {
             self.paths_blob.len()
     }
 
+    #[inline]
     fn encode(&self) -> Vec<u8> {
         let fixed = self.total_size_in_bytes();
         let mut buf = Vec::with_capacity(fixed);
@@ -470,8 +471,10 @@ impl Index {
         let sorted_modes  = order.iter().map(|&i| self.modes[i]).collect::<Vec<_>>();
         let sorted_hashes = order.iter().map(|&i| self.hashes[i]).collect::<Vec<_>>();
 
+        //
         // Single pass over the sorted array.
         // Consumes a contiguous slice = one directory (implemented iteratively, no recursion).
+        //
         let (hash, _consumed) = build_tree(
             repo,
             &sorted_paths,
@@ -487,8 +490,6 @@ impl Index {
 
 // Builds a tree for `dir` by consuming a contiguous slice of sorted entries.
 // Returns (tree_hash, how_many_entries_consumed).
-//
-// This is a hot path for `mog commit` and is intentionally implemented without recursion.
 fn build_tree(
     repo: &mut Repository,
     paths:  &[&str],
@@ -522,7 +523,9 @@ fn build_tree(
             (f.dir, f.dir.len())
         };
 
+        //
         // Finish the current frame if the next path is outside it (or we've run out of paths).
+        //
         let finish_now = if i >= paths.len() {
             true
         } else if cur_dir.is_empty() {
@@ -566,7 +569,10 @@ fn build_tree(
 
         match rel.find('/') {
             None => {
+                //
                 // Direct file child - add blob entry
+                //
+
                 let top = stack.last_mut().expect("non-empty stack");
                 top.tree_entries_buffer.push(TreeEntry {
                     mode: modes[i],
@@ -576,10 +582,13 @@ fn build_tree(
                 i += 1;
             }
             Some(slash) => {
+                //
                 // Subdirectory - push a new frame and build it first (post-order)
+                //
+
                 let subdir_name = &rel[..slash];
                 if subdir_name.is_empty() {
-                    // Defensive: avoid infinite loops if paths contain repeated/leading slashes.
+                    // Avoid infinite loops if paths contain repeated/leading slashes.
                     i += 1;
                     continue;
                 }

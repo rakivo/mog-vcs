@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-/// Data-oriented ignore matcher loaded from `.mogged`.
+/// Ignore matcher loaded from `.mogged`.
 ///
 /// Rules are repo-root-relative and use `/` separators.
-/// This is intentionally simple and flat so we can add a bloom-filter precheck later.
+/// This is intentionally very simple and flat so we can add a bloom-filter precheck later.
 pub struct Ignore {
     root: PathBuf,
     exact: Vec<Vec<u8>>,
@@ -19,15 +19,17 @@ impl Ignore {
     pub fn load(repo_root: &Path) -> Result<Self> {
         let root = repo_root.canonicalize()?;
 
-        let mut exact: Vec<Vec<u8>> = Vec::new();
-        let mut prefixes: Vec<Vec<u8>> = Vec::new();
-        let mut globs: Vec<SimpleGlob> = Vec::new();
+        let mut exact = Vec::new();
+        let mut prefixes = Vec::new();
+        let mut globs = Vec::new();
 
+        //
         // Builtins: always ignore VCS metadata + our own store.
-        prefixes.push(b".mog/".to_vec());
-        prefixes.push(b".git/".to_vec());
-        exact.push(b".mog".to_vec());
-        exact.push(b".git".to_vec());
+        //
+        prefixes.push(b".mog/".into());
+        prefixes.push(b".git/".into());
+        exact.push(b".mog".into());
+        exact.push(b".git".into());
 
         let path = root.join(".mogged");
         if let Ok(content) = std::fs::read_to_string(&path) {
@@ -46,20 +48,26 @@ impl Ignore {
                     continue;
                 }
 
+                //
                 // Directory rule: `foo/` => ignore prefix `foo/`.
+                //
                 if p.ends_with('/') {
                     prefixes.push(p.into_bytes());
                     continue;
                 }
 
+                //
                 // Glob rule.
+                //
                 if p.as_bytes().iter().any(|&b| matches!(b, b'*' | b'?' | b'[' | b']')) {
                     globs.push(SimpleGlob::new(&p));
                     continue;
                 }
 
+                //
                 // Exact rule, and also a directory prefix rule of the same name.
-                exact.push(p.as_bytes().to_vec());
+                //
+                exact.push(p.as_bytes().into());
                 let mut dir = p.into_bytes();
                 dir.push(b'/');
                 prefixes.push(dir);
@@ -137,7 +145,9 @@ impl SimpleGlob {
     pub fn is_match(&self, text: &[u8]) -> bool {
         let pat = &self.pat;
 
+        //
         // Two-pointer with backtracking for `*`.
+        //
         let (mut pi, mut ti) = (0usize, 0usize);
         let (mut star, mut star_text) = (None::<usize>, 0usize);
 
@@ -166,7 +176,7 @@ impl SimpleGlob {
             return false;
         }
 
-        // Consume trailing stars.
+        // Trailing
         while pi < pat.len() && pat[pi] == b'*' {
             pi += 1;
         }

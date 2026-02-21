@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use memmap2::{MmapMut, MmapOptions};
 use libc::{madvise, MADV_DONTNEED, MADV_SEQUENTIAL, MADV_WILLNEED};
 
-const MAGIC: &[u8; 4] = b"VXOB";
+const MAGIC: &[u8; 4] = b"MOGS";
 const VERSION: u32 = 1;
 
 const HEADER_SIZE: usize = 128;
@@ -182,6 +182,7 @@ impl Storage {
     }
 
     /// Read encoded object bytes by hash.
+    #[inline]
     pub fn read(&self, hash: &Hash) -> Result<&[u8]> {
         let _span = tracy::span!("Storage::read");
 
@@ -223,66 +224,6 @@ impl Storage {
         self.pending_writes.push(PendingStorageWrite { hash, data: data.into() });
     }
 
-    /// Write encoded objects from caller buffers. One buffer, one `write_at`.
-    pub fn write_batch<'a>(&mut self, entries: impl Iterator<Item = (Hash, &'a [u8])>) -> Result<()> {
-        let _span = tracy::span!("Storage::write_batch");
-
-        let to_write: Vec<(Hash, &[u8])> = entries
-            .filter(|(hash, _)| !self.exists(hash))
-            .collect();
-
-        if to_write.is_empty() {
-            return Ok(());
-        }
-
-        let total_size: usize = to_write.iter()
-            .map(|(_, e)| ENTRY_HEADER_SIZE + e.len())
-            .sum();
-
-        let current_size = self.file_len;
-        self.file_len = current_size + total_size as u64;
-        self.file.set_len(self.file_len)?;
-
-        let mut buf = Vec::with_capacity(total_size);
-        for (hash, encoded) in &to_write {
-            buf.extend_from_slice(hash);
-            buf.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
-            buf.extend_from_slice(encoded);
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            self.file.write_at(&buf, current_size)?;
-        }
-        #[cfg(not(unix))]
-        {
-            self.file.seek(SeekFrom::Start(current_size))?;
-            self.file.write_all(&buf)?;
-        }
-
-        let mut offset = current_size;
-        for (hash, encoded) in &to_write {
-            let bucket = Self::hash_to_bucket(hash);
-            let mut current_bucket = bucket;
-            loop {
-                if self.get_bucket_offset(current_bucket) == 0 {
-                    self.set_bucket_offset(current_bucket, offset);
-                    break;
-                }
-                current_bucket = (current_bucket + 1) % HASH_TABLE_BUCKETS;
-                if current_bucket == bucket {
-                    bail!("hash table full");
-                }
-            }
-            offset += (ENTRY_HEADER_SIZE + encoded.len()) as u64;
-        }
-
-        let count = u64::from_le_bytes(self.mmap[8..16].try_into()?);
-        self.mmap[8..16].copy_from_slice(&(count + to_write.len() as u64).to_le_bytes());
-        Ok(())
-    }
-
     /// Flush mmap and fsync. Call once after many `write_batch` calls (e.g. at end of add).
     #[inline]
     pub fn sync(&mut self) -> Result<()> {
@@ -298,7 +239,7 @@ impl Storage {
                 let ptr   = data.as_ptr() as usize;
                 let end   = ptr + data.len();
                 let page  = 4096usize;
-                // round down to page boundary
+                // Round down to page boundary
                 let aligned_ptr = (ptr & !(page - 1)) as *mut libc::c_void;
                 let aligned_len = end.next_multiple_of(page) - (ptr & !(page - 1));
                 libc::madvise(aligned_ptr, aligned_len, libc::MADV_DONTNEED);
@@ -306,62 +247,69 @@ impl Storage {
         }
     }
 
+    // @Cleanup
+    /// Write encoded objects from caller buffers. One buffer, one `write_at`.
+    #[inline]
+    pub fn write_batch<'a>(&mut self, writes: impl Iterator<Item = (Hash, &'a [u8])>) -> Result<()> {
+        self.flush_impl(writes)
+    }
+
+    #[inline]
     pub fn flush(&mut self) -> Result<()> {
+        let writes = core::mem::take(&mut self.pending_writes);
+        self.flush_impl(writes.iter().map(|p| (p.hash, p.data.as_ref())))?;
+        self.sync()
+    }
+
+    // @Cleanup
+    pub fn flush_impl<'a>(&mut self, writes: impl Iterator<Item = (Hash, &'a [u8])>) -> Result<()> {
         let _span = tracy::span!("Storage::flush");
 
-        if self.pending_writes.is_empty() {
+        let mut buf        = Vec::new();
+        let mut to_insert  = Vec::new();
+        let mut offset     = self.file_len;
+
+        for (hash, encoded) in writes {
+            if self.exists(&hash) {
+                continue;
+            }
+
+            buf.extend_from_slice(&hash);
+            buf.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            buf.extend_from_slice(encoded);
+            to_insert.push((hash, offset));
+            offset += (ENTRY_HEADER_SIZE + encoded.len()) as u64;
+        }
+
+        if buf.is_empty() {
             return Ok(());
         }
 
-        let writes = std::mem::take(&mut self.pending_writes);
-        let total_size: usize = writes.iter()
-            .map(|PendingStorageWrite { data, .. }| ENTRY_HEADER_SIZE + data.len())
-            .sum();
-
         let current_size = self.file_len;
-        self.file_len = current_size + total_size as u64;
+        self.file_len = offset;
         self.file.set_len(self.file_len)?;
 
-        let mut buf = Vec::with_capacity(total_size);
-
-        for PendingStorageWrite { hash, data: encoded } in &writes {
-            buf.extend_from_slice(hash);
-            buf.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
-            buf.extend_from_slice(encoded);
-        }
-
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            self.file.write_at(&buf, current_size)?;
-        }
+        { use std::os::unix::fs::FileExt; self.file.write_at(&buf, current_size)?; }
         #[cfg(not(unix))]
-        {
-            self.file.seek(SeekFrom::Start(current_size))?;
-            self.file.write_all(&buf)?;
-        }
+        { self.file.seek(SeekFrom::Start(current_size))?; self.file.write_all(&buf)?; }
 
-        let mut off = current_size;
-        for PendingStorageWrite { hash, data: encoded } in &writes {
+        for (hash, offset) in &to_insert {
             let bucket = Self::hash_to_bucket(hash);
             let mut current_bucket = bucket;
             loop {
                 if self.get_bucket_offset(current_bucket) == 0 {
-                    self.set_bucket_offset(current_bucket, off);
+                    self.set_bucket_offset(current_bucket, *offset);
                     break;
                 }
+
                 current_bucket = (current_bucket + 1) % HASH_TABLE_BUCKETS;
-                if current_bucket == bucket {
-                    bail!("hash table full");
-                }
+                if current_bucket == bucket { bail!("hash table full"); }
             }
-            off += (ENTRY_HEADER_SIZE + encoded.len()) as u64;
         }
 
         let count = u64::from_le_bytes(self.mmap[8..16].try_into()?);
-        self.mmap[8..16].copy_from_slice(&(count + writes.len() as u64).to_le_bytes());
-
-        self.sync()?;
+        self.mmap[8..16].copy_from_slice(&(count + to_insert.len() as u64).to_le_bytes());
 
         Ok(())
     }

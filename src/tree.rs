@@ -23,7 +23,7 @@ pub struct TreeEntryRef<'a> {
 
 impl TreeEntryRef<'_> {
     #[inline]
-    #[must_use] 
+    #[must_use]
     pub fn into_entry(self) -> TreeEntry {
         TreeEntry {
             name: self.name.into(),
@@ -73,20 +73,25 @@ impl TreePayloadOwned {
 impl Decode for TreePayloadOwned {
     fn decode(r: &mut ReadCursor<'_>) -> Result<Self> {
         let count = r.read_u32()? as usize;
+
         let mut modes = Vec::with_capacity(count);
         for _ in 0..count {
             modes.push(r.read_u32()?);
         }
+
         let mut hashes = Vec::with_capacity(count);
         for _ in 0..count {
             hashes.push(r.read_hash()?);
         }
+
         let mut name_offsets = Vec::with_capacity(count + 1);
         for _ in 0..count {
             name_offsets.push(r.read_u32()? as usize);
         }
+
         let names_len = r.read_u32()? as usize;
         let names_blob = r.read_bytes(names_len)?;
+
         let mut entries = Vec::with_capacity(count);
         for i in 0..count {
             let start = name_offsets[i];
@@ -98,6 +103,7 @@ impl Decode for TreePayloadOwned {
                 name: name.into(),
             });
         }
+
         Ok(TreePayloadOwned::new(entries.into_boxed_slice()))
     }
 }
@@ -112,19 +118,25 @@ impl<'a> TreePayloadRef<'a> {
 impl Encode for TreePayloadView<'_> {
     fn encode(&self, w: &mut WriteCursor<'_>) {
         let n = self.entries.len();
+
         w.write_u32(n as u32);
+
         for entry in self.entries {
             w.write_u32(entry.mode);
         }
+
         for entry in self.entries {
             w.write_hash(&entry.hash);
         }
+
         let mut name_start = 0u32;
         for entry in self.entries {
             w.write_u32(name_start);
             name_start += entry.name.len() as u32;
         }
+
         w.write_u32(name_start);
+
         for entry in self.entries {
             w.write_slice(entry.name.as_bytes());
         }
