@@ -80,12 +80,12 @@ pub fn hash_object(object: Object, stores: &Stores) -> Hash {
     blake3::hash(&buf).into()
 }
 
-/// Encode raw bytes as on-disk blob (VX01 + type + len + data).
+/// Encode raw bytes as on-disk blob (MG01 + type + len + data).
 #[inline]
 pub fn encode_blob_into(data: &[u8], buf: &mut Vec<u8>) {
     buf.clear();
     buf.reserve(4 + 1 + 8 + data.len());
-    buf.extend_from_slice(b"VX01");
+    buf.extend_from_slice(b"MG01");
     buf.push(ObjectTag::Blob.as_byte());
     buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
     buf.extend_from_slice(data);
@@ -107,7 +107,7 @@ pub fn encode_blob_id_and_hash(store: &BlobStore, id: BlobId, buf: &mut Vec<u8>)
 pub fn decode_blob_bytes(data: &[u8]) -> Result<&[u8]> {
     if data.len() < 5 { bail!("data too short"); }
 
-    if &data[0..4] != b"VX01" { bail!("invalid magic"); }
+    if &data[0..4] != b"MG01" { bail!("invalid magic"); }
     if data[4] != ObjectTag::Blob as u8 { bail!("not a blob"); }
 
     let mut r = ReadCursor::new(&data[5..]);
@@ -116,13 +116,13 @@ pub fn decode_blob_bytes(data: &[u8]) -> Result<&[u8]> {
     r.read_bytes(len)
 }
 
-/// Encode raw bytes as on-disk blob (VX01 + type + len + data).
+/// Encode raw bytes as on-disk blob (MG01 + type + len + data).
 #[inline]
 #[must_use]
 pub fn hash_blob(data: &[u8]) -> Hash {
     let mut hasher = blake3::Hasher::new();
 
-    hasher.update(b"VX01");
+    hasher.update(b"MG01");
     hasher.update(&[ObjectTag::Blob.as_byte()]);
     hasher.update(&(data.len() as u64).to_le_bytes());
     hasher.update(data);
@@ -134,7 +134,7 @@ pub fn hash_blob(data: &[u8]) -> Hash {
 pub fn decode_tree_entries(data: &[u8]) -> Result<Box<[TreeEntry]>> {
     if data.len() < 5 { bail!("data too short"); }
 
-    if &data[0..4] != b"VX01" { bail!("invalid magic"); }
+    if &data[0..4] != b"MG01" { bail!("invalid magic"); }
     if data[4] != ObjectTag::Tree as u8 { bail!("not a tree"); }
 
     let mut r = ReadCursor::new(&data[5..]);

@@ -21,7 +21,14 @@ enum StashAction {
     Pop,
     /// List all stash entries.
     List,
+    // TODO: Default stash index `StashAction::Drop` to the latest stash
+    /// Same as Pop but doesn't remove the stash.
+    Apply { index: Option<usize> },
+    /// Just removes the stash.
+    Drop { index: Option<usize> },
 }
+
+// TODO: Subcommand to unstage all removed files.
 
 #[derive(Subcommand)]
 enum Commands {
@@ -37,6 +44,8 @@ enum Commands {
     Unstage {
         files: Vec<PathBuf>,
     },
+    /// Stash changes and apply them right away, saving the stash.
+    Checkpoint,
     /// Make a commit.
     Commit {
         #[arg(short = 'm')]
@@ -155,12 +164,20 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Checkpoint => {
+            let mut repo = Repository::open(".")?;
+            mog::stash::stash(&mut repo)?;
+            mog::stash::stash_apply(&mut repo, 0)?;
+        }
+
         Commands::Stash { action } => {
             let mut repo = Repository::open(".")?;
             match action {
                 StashAction::Save => mog::stash::stash(&mut repo)?,
                 StashAction::Pop  => mog::stash::stash_pop(&mut repo)?,
                 StashAction::List => mog::stash::stash_list(&mut repo)?,
+                StashAction::Apply { index } => mog::stash::stash_apply(&mut repo, index.unwrap_or(0))?,
+                StashAction::Drop  { index } => mog::stash::stash_drop(&repo,     index.unwrap_or(0))?,
             }
         }
 

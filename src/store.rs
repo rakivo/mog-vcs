@@ -35,7 +35,7 @@ impl Stores {
         if data.len() < 5 {
             bail!("data too short");
         }
-        if &data[0..4] != b"VX01" {
+        if &data[0..4] != b"MG01" {
             bail!("invalid magic");
         }
         let tag = data[4];
@@ -67,7 +67,7 @@ impl Stores {
         // @Cleanup
 
         into.clear();
-        into.extend_from_slice(b"VX01");
+        into.extend_from_slice(b"MG01");
         match object {
             Object::Blob(id) => {
                 into.push(ObjectTag::Blob.as_byte());

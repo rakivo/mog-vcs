@@ -23,6 +23,7 @@ pub struct PendingStorageWrite {
     pub data: Box<[u8]>,
 }
 
+// TODO: Mock storage for tests
 pub struct Storage {
     file: File,
     mmap: MmapMut,
@@ -233,6 +234,12 @@ impl Storage {
     }
 
     #[inline]
+    fn remap(&mut self) -> Result<()> {
+        self.mmap = unsafe { MmapOptions::new().map_mut(&self.file)? };
+        Ok(())
+    }
+
+    #[inline]
     pub fn evict_pages(&self, data: &[u8]) {
         #[cfg(unix)] {
             unsafe {
@@ -258,7 +265,9 @@ impl Storage {
     pub fn flush(&mut self) -> Result<()> {
         let writes = core::mem::take(&mut self.pending_writes);
         self.flush_impl(writes.iter().map(|p| (p.hash, p.data.as_ref())))?;
-        self.sync()
+        self.sync()?;
+        self.remap()?;
+        Ok(())
     }
 
     // @Cleanup

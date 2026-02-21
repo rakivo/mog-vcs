@@ -25,7 +25,7 @@ fn write_tree_impl(repo: &mut Repository, root: &Path) -> Result<Hash> {
     }
 
     let mut stack = vec![Frame {
-        dir:     root.to_path_buf().into(),
+        dir:     root.into(),
         entries: sorted_dir_entries(root)?,
         built:   Vec::new(),
     }];
