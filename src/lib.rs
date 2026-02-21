@@ -8,6 +8,7 @@
     clippy::inline_always,
     clippy::uninlined_format_args, // ?...
     clippy::borrow_as_ptr,
+    clippy::single_match_else,
     clippy::collapsible_if,
     clippy::new_without_default,
     clippy::redundant_field_names,
@@ -59,4 +60,5 @@ pub mod unstage;
 pub mod util;
 pub mod tracy;
 pub mod tree;
+pub mod stash;
 pub mod discard;

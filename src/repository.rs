@@ -104,6 +104,13 @@ target/\n\
     }
 
     #[inline]
+    pub fn read_object_without_touching_cache(&mut self, hash: &Hash) -> Result<Object> {
+        let data = self.storage.read(hash)?;
+        let object = self.stores.decode_and_push_object(data)?; // @Incomplete: Don't push to stores
+        Ok(object)
+    }
+
+    #[inline]
     pub fn read_tree_entries_without_touching_cache(&mut self, hash: &Hash) -> Result<Box<[TreeEntry]>> {
         let data = self.storage.read(hash)?;
         crate::object::decode_tree_entries(data)

@@ -103,7 +103,7 @@ fn discard_all(repo: &mut Repository, index: &Index) -> Result<()> {
     Ok(())
 }
 
-fn remove_empty_dirs(root: &Path) -> Result<()> {
+pub fn remove_empty_dirs(root: &Path) -> Result<()> {
     for entry in std::fs::read_dir(root)?.filter_map(Result::ok) {
         let path = entry.path();
         if !path.is_dir() { continue }

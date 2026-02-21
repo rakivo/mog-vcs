@@ -14,33 +14,50 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum StashAction {
+    /// Save dirty files and restore working dir to index state.
+    Save,
+    /// Restore most recent stash and remove it.
+    Pop,
+    /// List all stash entries.
+    List,
+}
+
+#[derive(Subcommand)]
 enum Commands {
+    /// Initialize an empty mog repository.
     Init {
         path: Option<PathBuf>,
     },
-    HashObject {
-        #[arg(short = 'w')]
-        write: bool,
-        file: PathBuf,
-    },
-    CatFile {
-        hash: String,
-    },
-    WriteTree,
-    Log,
-    /// Add paths to the index (stage)
+    /// Add paths to the index
     Stage {
         files: Vec<PathBuf>,
     },
-    /// Remove paths from the index (unstage)
+    /// Remove paths from the index
     Unstage {
         files: Vec<PathBuf>,
+    },
+    /// Make a commit.
+    Commit {
+        #[arg(short = 'm')]
+        message: String,
+
+        #[arg(long, default_value = "Your Name")]
+        author: String,
     },
     /// Discard working directory changes, restoring to index state.
     Discard {
         /// Paths to discard (omit to discard everything).
         files: Vec<PathBuf>,
     },
+    /// Save, Pop or List all stashes.
+    Stash {
+        #[command(subcommand)]
+        action: StashAction,
+    },
+    /// Log all commits.
+    Log,
+    /// Switch to (and possibly creating) a branch and update the working directory.
     Checkout {
         branch: String,
 
@@ -51,13 +68,7 @@ enum Commands {
         #[arg(short = 'b', long)]
         new_branch: bool,
     },
-    Commit {
-        #[arg(short = 'm')]
-        message: String,
-
-        #[arg(long, default_value = "Your Name")]
-        author: String,
-    },
+    /// List all branches, or Create, Delete or Rename a branch.
     Branch {
         /// Name of branch to create (omit to list branches)
         name: Option<String>,
@@ -80,6 +91,18 @@ enum Commands {
     },
     /// Show working tree status (staged, modified, deleted, untracked)
     Status,
+    /// Encode an object and output the hash.
+    HashObject {
+        #[arg(short = 'w')]
+        write: bool,
+        file: PathBuf,
+    },
+    /// Cat Blob/Tree/Commit by a hash.
+    CatFile {
+        hash: String,
+    },
+    /// Iterate a directory recursively and hash all blobs and trees.
+    WriteTree,
 }
 
 fn main() -> Result<()> {
@@ -129,6 +152,15 @@ fn main() -> Result<()> {
                     Some(p) => mog::checkout::checkout_path(&mut repo, &branch, &p)?,
                     None => mog::checkout::checkout(&mut repo, &branch)?,
                 }
+            }
+        }
+
+        Commands::Stash { action } => {
+            let mut repo = Repository::open(".")?;
+            match action {
+                StashAction::Save => mog::stash::stash(&mut repo)?,
+                StashAction::Pop  => mog::stash::stash_pop(&mut repo)?,
+                StashAction::List => mog::stash::stash_list(&mut repo)?,
             }
         }
 

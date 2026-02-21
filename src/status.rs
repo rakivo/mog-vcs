@@ -24,8 +24,8 @@ pub fn status(repo: &mut Repository) -> Result<()> {
         .map(|id| repo.commit.get_tree(id));
 
     let head_flat = match head_tree {
-        Some(tree_hash) => flatten_head_tree(repo, tree_hash)?,
-        None => HeadTreeFlat {
+        Some(tree_hash) => flatten_tree(repo, tree_hash)?,
+        None => SortedFlatTree {
             path_blob: Box::default(),
             path_offsets: [0].into(),
             hashes: Box::default(),
@@ -38,19 +38,22 @@ pub fn status(repo: &mut Repository) -> Result<()> {
     Ok(())
 }
 
-// HEAD tree, sorted for binary search
-pub struct HeadTreeFlat {
+// Sorted tree for binary search
+pub struct SortedFlatTree {
     /// Path strings concatenated; no trailing slash.
-    path_blob: Box<[u8]>,
+    pub path_blob: Box<[u8]>,
+
     /// Start offset of path i in `path_blob`. len+1 entries (last = `path_blob.len()`).
-    path_offsets: Box<[u32]>,
+    pub path_offsets: Box<[u32]>,
+
     /// Hash for path at index i.
-    hashes: Box<[Hash]>,
+    pub hashes: Box<[Hash]>,
+
     /// Sorted by path for lookup: `sorted_order`[j] = index into `path_offsets/hashes`.
-    sorted_order: Box<[usize]>,
+    pub sorted_order: Box<[usize]>,
 }
 
-impl HeadTreeFlat {
+impl SortedFlatTree {
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
@@ -92,7 +95,7 @@ impl HeadTreeFlat {
     }
 }
 
-fn flatten_head_tree(repo: &mut Repository, tree_hash: Hash) -> Result<HeadTreeFlat> {
+pub fn flatten_tree(repo: &mut Repository, tree_hash: Hash) -> Result<SortedFlatTree> {
     struct Frame {
         tree_id: TreeId,
         prefix: Box<str>
@@ -161,7 +164,7 @@ fn flatten_head_tree(repo: &mut Repository, tree_hash: Hash) -> Result<HeadTreeF
         sa.cmp(sb)
     });
 
-    Ok(HeadTreeFlat {
+    Ok(SortedFlatTree {
         path_blob: crate::util::vec_into_boxed_slice_noshrink(path_blob),
         path_offsets: crate::util::vec_into_boxed_slice_noshrink(path_offsets),
         hashes: crate::util::vec_into_boxed_slice_noshrink(hashes),
@@ -187,7 +190,7 @@ pub struct StatusBuckets {
 
 fn collect_status(
     index: &Index,
-    head: &HeadTreeFlat,
+    head: &SortedFlatTree,
     repo_root: &Path,
     ignore: &Ignore,
 ) -> StatusBuckets {
