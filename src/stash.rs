@@ -21,7 +21,7 @@ pub fn stash(repo: &mut Repository) -> Result<()> {
 
     let staged_entries = (0..index.count).map(|i| TreeEntry {
         hash: index.hashes[i],
-        name: index.get_path(i).to_string().into(),
+        name: index.get_path(i).into(),
         mode: index.modes[i],
     }).collect::<Vec<_>>();
     let staged_tree_id   = repo.tree.push(&staged_entries);
@@ -52,7 +52,7 @@ pub fn stash(repo: &mut Repository) -> Result<()> {
         let hash = repo.write_blob(&data);
         dirty_entries.push(TreeEntry {
             hash,
-            name: path_str.to_string().into(),
+            name: path_str.into(),
             mode: if is_executable(&meta) { MODE_EXEC } else { MODE_FILE },
         });
     }
@@ -136,7 +136,7 @@ pub fn stash(repo: &mut Repository) -> Result<()> {
             //
             for i in 0..index.count {
                 let abs = repo.root.join(index.get_path(i));
-                let _ = fs::remove_file(&abs);
+                _ = fs::remove_file(&abs);
             }
             crate::discard::remove_empty_dirs(&repo.root)?;
             Index::default().save(&repo.root)?;
