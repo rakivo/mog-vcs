@@ -22,6 +22,7 @@ libc = "0.2.182"
 cranelift-entity = "0.112"
 regex = "1.11"
 rayon = "1.11.0"
+imara-diff = "0.2.0"
 
 [dev-dependencies]
 tempfile = "3"

@@ -66,6 +66,14 @@ enum Commands {
         #[command(subcommand)]
         action: StashAction,
     },
+    // TODO: Diff between working directory and a branch.
+    // TODO: Diff between working directory and a commit.
+    /// Print the diff between working directory and index.
+    Diff {
+        /// Compare HEAD vs index.
+        #[arg(short = 'b', long)]
+        staged: bool,
+    },
     /// Log all commits.
     Log,
     /// Switch to (and possibly creating) a branch and update the working directory.
@@ -187,6 +195,15 @@ fn main() -> Result<()> {
         Commands::Discard { files } => {
             let mut repo = Repository::open(".")?;
             mog::discard::discard(&mut repo, &files)?;
+        }
+
+        Commands::Diff { staged } => {
+            let mut repo = Repository::open(".")?;
+            if staged {
+                mog::diff::diff_staged(&mut repo)?;
+            } else {
+                mog::diff::diff(&mut repo)?;
+            }
         }
 
         Commands::Branch { name, at, delete, force_delete, rename_to } => {

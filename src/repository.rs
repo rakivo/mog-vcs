@@ -128,20 +128,20 @@ impl<S: MogStorage> Repository<S> {
     }
 
     #[inline]
-    pub fn read_tree_entries_without_touching_cache(&mut self, hash: &Hash) -> Result<Box<[TreeEntry]>> {
+    pub fn read_tree_entries_without_touching_cache(&self, hash: &Hash) -> Result<Box<[TreeEntry]>> {
         let data = self.storage.read(hash)?;
         crate::object::decode_tree_entries(data)
     }
 
     #[inline]
-    pub fn read_blob_bytes_without_touching_cache(&mut self, hash: &Hash) -> Result<&[u8]> {
+    pub fn read_blob_bytes_without_touching_cache(&self, hash: &Hash) -> Result<&[u8]> {
         let data = self.storage.read(hash)?;
         crate::object::decode_blob_bytes(data)
     }
 
     #[inline]
     pub fn with_blob_bytes_without_touching_cache_and_evict_the_pages<T, E: Into<anyhow::Error>>(
-        &mut self,
+        &self,
         hash: &Hash,
         callback: impl FnOnce(&Self, &[u8]) -> std::result::Result<T, E>
     ) -> Result<T> {

@@ -54,6 +54,7 @@ pub struct Index {
     path_index: Xxh3HashMap<u64, Vec<usize>>,
 }
 
+#[derive(Debug)]
 pub struct IndexEntryRef<'a> {
     // align 8
     pub hash:  &'a Hash,
