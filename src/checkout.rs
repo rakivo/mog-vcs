@@ -2,6 +2,7 @@ use crate::hash::{hash_to_hex, hex_to_hash, Hash};
 use crate::index::Index;
 use crate::repository::Repository;
 use crate::object::{Object, MODE_DIR};
+use crate::storage::Storage;
 use crate::store::{BlobId, CommitId};
 use crate::tree::TreeEntry;
 
@@ -70,17 +71,6 @@ pub fn checkout_path(repo: &mut Repository, target: &str, path: &str) -> Result<
 }
 
 #[inline]
-pub fn checkout_commit(repo: &mut Repository, commit_id: CommitId) -> Result<()> {
-    let tree_hash = repo.commit.get_tree(commit_id);
-    checkout_tree(repo, tree_hash)
-}
-
-#[inline]
-pub fn checkout_tree(repo: &mut Repository, tree_hash: Hash) -> Result<()> {
-    checkout_tree_impl(repo, tree_hash, "")
-}
-
-#[inline]
 pub fn checkout_blob_to(repo: &Repository, blob_id: BlobId, to: &str) -> Result<()> {
     let path = repo.root.join(to);
     if let Some(parent) = path.parent() {
@@ -91,23 +81,53 @@ pub fn checkout_blob_to(repo: &Repository, blob_id: BlobId, to: &str) -> Result<
     Ok(())
 }
 
+#[inline]
+pub fn checkout_commit(repo: &mut Repository, commit_id: CommitId) -> Result<()> {
+    let tree_hash = repo.commit.get_tree(commit_id);
+    checkout_tree(repo, tree_hash)
+}
+
+#[inline]
+pub fn checkout_tree(repo: &mut Repository, tree_hash: Hash) -> Result<()> {
+    checkout_tree_impl(repo, tree_hash, "")
+}
+
 pub fn checkout_tree_impl(
     repo: &mut Repository,
     tree_hash: Hash,
     prefix: &str,
 ) -> Result<()> {
+    // Flatten the target tree to know which paths should exist.
+    let target_flat = crate::status::flatten_tree(repo, tree_hash)?;
+
+    //
+    // Delete tracked files not present in the target tree.
+    //
+
+    let index = crate::index::Index::load(&repo.root)?;
+    for i in 0..index.count {
+        let path_str = index.get_path(i);
+        if target_flat.lookup(path_str).is_none() {
+            let abs = repo.root.join(path_str);
+            let _ = std::fs::remove_file(&abs);
+        }
+    }
+    crate::discard::remove_empty_dirs(&repo.root)?;
+
+    // Then rebuild index from target tree.
+    let mut new_index = crate::index::Index::default();
+
     struct Frame {
         tree_hash: Hash,
         prefix: Box<str>,
     }
 
     let mut stack = vec![Frame { tree_hash, prefix: prefix.into() }];
-
     while let Some(Frame { tree_hash, prefix: frame_prefix }) = stack.pop() {
         let entries = {
             let raw = repo.storage.read(&tree_hash)?;
             let entries = crate::object::decode_tree_entries(raw)?;
-            repo.storage.evict_pages(raw);
+            Storage::evict_pages(raw);
             entries
         };
 
@@ -129,13 +149,18 @@ pub fn checkout_tree_impl(
                 // Blob: read raw bytes directly, bypassing the blob store entirely.
                 //
                 let path = repo.root.join(child_path.as_ref());
-                let raw = repo.storage.read(&hash)?;
-                let data = crate::object::decode_blob_bytes(raw)?;
-                std::fs::write(path, data)?;
-                repo.storage.evict_pages(raw);
+                _ = repo.with_blob_bytes_without_touching_cache_and_evict_the_pages(
+                    &hash,
+                    |_repo, data| std::fs::write(&path, data)
+                )?;
+
+                let meta = std::fs::metadata(&path)?;
+                new_index.add(&child_path, hash, &meta);
             }
         }
     }
+
+    new_index.save(&repo.root)?;
 
     Ok(())
 }

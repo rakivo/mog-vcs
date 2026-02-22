@@ -2,10 +2,6 @@ use mog::repository::Repository;
 use mog::index::Index;
 use mog::storage::MogStorage;
 
-fn mock_repo() -> Repository<mog::storage_mock::MockStorage> {
-    Repository::new_mock()
-}
-
 // @Note: These are AI generated, but it's fine for a start I guess...
 
 //
@@ -1859,6 +1855,10 @@ fn test_sorted_flat_tree_lookup_matches_linear_scan() {
 // Helpers
 //
 //
+
+fn mock_repo() -> Repository<mog::storage_mock::MockStorage> {
+    Repository::new_mock()
+}
 
 /// Build a fake Metadata-equivalent struct for index tests.
 /// Since fs::Metadata can't be constructed directly, Index::add

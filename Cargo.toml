@@ -23,8 +23,16 @@ cranelift-entity = "0.112"
 regex = "1.11"
 rayon = "1.11.0"
 
+[dev-dependencies]
+tempfile = "3"
+filetime = "0.2"
+
 [profile.dev.package."*"]
 debug = 2
+
+[[test]]
+name = "integration"
+harness = true
 
 [profile.dev]
 opt-level = 0

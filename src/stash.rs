@@ -61,7 +61,16 @@ pub fn stash(repo: &mut Repository) -> Result<()> {
     let dirty_tree_id   = repo.tree.push(&dirty_entries);
     let dirty_tree_hash = repo.write_object(Object::Tree(dirty_tree_id));
 
-    if staged_entries.is_empty() && dirty_entries.is_empty() {
+    let is_noop = match repo.read_head_commit().ok() {
+        Some(head_hash) => {
+            let obj = repo.read_object(&head_hash)?;
+            let cid = obj.try_as_commit_id()?;
+            repo.commit.get_tree(cid) == staged_tree_hash
+        }
+        None => staged_entries.is_empty(),
+    };
+
+    if is_noop && dirty_entries.is_empty() {
         println!("No local changes to stash");
         return Ok(());
     }
@@ -114,22 +123,37 @@ pub fn stash(repo: &mut Repository) -> Result<()> {
             let head_flat = crate::status::flatten_tree(repo, tree_hash)?;
 
             //
-            // Restore index to HEAD.
+            // Delete files in index that aren't in HEAD
             //
+
+            for i in 0..index.count {
+                let path_str = index.get_path(i);
+                if head_flat.lookup(path_str).is_none() {
+                    let abs = repo.root.join(path_str);
+                    _ = fs::remove_file(&abs);
+                }
+            }
+
+            //
+            // Restore index to HEAD
+            //
+
             let mut new_index = Index::default();
             for j in 0..head_flat.len() {
                 let path_str = head_flat.get_path(j);
                 let hash     = head_flat.hashes[j];
                 let abs      = repo.root.join(path_str);
-                let obj      = repo.read_object(&hash)?;
-                let _        = obj.try_as_blob_id()?; // assert it's a blob
-                let raw      = repo.storage.read(&hash)?;
-                let data     = crate::object::decode_blob_bytes(raw)?;
-                fs::write(&abs, data)?;
-                repo.storage.evict_pages(raw);
+                if let Some(parent) = abs.parent() { fs::create_dir_all(parent)?; }
+
+                repo.with_blob_bytes_without_touching_cache_and_evict_the_pages(
+                    &hash,
+                    |_repo, data| std::fs::write(&abs, data)
+                )?;
+
                 let meta = fs::metadata(&abs)?;
                 new_index.add(path_str, hash, &meta);
             }
+
             new_index.save(&repo.root)?;
         }
         None => {
@@ -275,8 +299,8 @@ fn read_stash_indexes(refs_dir: impl AsRef<Path>) -> Result<impl Iterator<Item =
 }
 
 fn apply_stash(repo: &mut Repository, stash_hash: Hash) -> Result<()> {
-    let obj       = repo.read_object(&stash_hash)?;
-    let commit_id = obj.try_as_commit_id()?;
+    let object    = repo.read_object(&stash_hash)?;
+    let commit_id = object.try_as_commit_id()?;
     let message   = repo.commit.get_message(commit_id).to_string();
     let tree_hash = repo.commit.get_tree(commit_id);
 
@@ -286,8 +310,11 @@ fn apply_stash(repo: &mut Repository, stash_hash: Hash) -> Result<()> {
         .and_then(|l| crate::hash::hex_to_hash(l.trim_start_matches("dirty=")).ok());
 
     //
+    //
     // Restore staged state into index and disk.
     //
+    //
+
     let staged_obj     = repo.read_object(&tree_hash)?;
     let staged_tree_id = staged_obj.try_as_tree_id()?;
     let n              = repo.tree.entry_count(staged_tree_id);
@@ -301,20 +328,21 @@ fn apply_stash(repo: &mut Repository, stash_hash: Hash) -> Result<()> {
             fs::create_dir_all(parent)?;
         }
 
-        {
-            let raw  = repo.storage.read(&hash)?;
-            let data = crate::object::decode_blob_bytes(raw)?;
-            fs::write(&abs, data)?;
-            repo.storage.evict_pages(raw);
-        }
+        repo.with_blob_bytes_without_touching_cache_and_evict_the_pages(
+            &hash,
+            |_repo, data| std::fs::write(&abs, data)
+        )?;
 
         let meta = fs::metadata(&abs)?;
         index.add(name.as_ref(), hash, &meta);
     }
 
     //
+    //
     // Overlay dirty disk changes on top.
     //
+    //
+
     if let Some(dirty_hash) = dirty_tree_hash {
         let dirty_obj     = repo.read_object(&dirty_hash)?;
         let dirty_tree_id = dirty_obj.try_as_tree_id()?;
@@ -322,12 +350,12 @@ fn apply_stash(repo: &mut Repository, stash_hash: Hash) -> Result<()> {
         for j in 0..m {
             let TreeEntry { hash, name, .. } = repo.tree.get_entry(dirty_tree_id, j);
             let abs  = repo.root.join(name.as_ref());
-            {
-                let raw  = repo.storage.read(&hash)?;
-                let data = crate::object::decode_blob_bytes(raw)?;
-                fs::write(&abs, data)?;
-                repo.storage.evict_pages(raw);
-            }
+
+            repo.with_blob_bytes_without_touching_cache_and_evict_the_pages(
+                &hash,
+                |_repo, data| std::fs::write(&abs, data)
+            )?;
+
             //
             // Don't update index, dirty files should show as modified.
             //

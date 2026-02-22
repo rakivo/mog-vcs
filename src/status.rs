@@ -34,7 +34,7 @@ pub fn status(repo: &mut Repository) -> Result<()> {
         },
     };
 
-    let buckets = collect_status(&index, &head_flat, &repo.root, &repo.ignore);
+    let buckets = collect_status_impl(&index, &head_flat, &repo.root, &repo.ignore);
     print_status(&buckets, &mut std::io::stdout())?;
     Ok(())
 }
@@ -111,6 +111,7 @@ impl Default for FlatTreeBuilder {
 }
 
 // Sorted tree for binary search
+#[derive(Default)]
 pub struct SortedFlatTree {
     /// Path strings concatenated; no trailing slash.
     pub path_blob: Box<[u8]>,
@@ -260,7 +261,20 @@ pub struct StatusBuckets {
     pub untracked: Vec<Box<str>>,
 }
 
-fn collect_status(
+pub fn collect_status(repo: &mut Repository) -> Result<StatusBuckets> {
+    let index    = Index::load(&repo.root)?;
+    let head_flat = match repo.read_head_commit().ok() {
+        Some(h) => {
+            let obj = repo.read_object(&h)?;
+            let cid = obj.try_as_commit_id()?;
+            flatten_tree(repo, repo.commit.get_tree(cid))?
+        }
+        None => SortedFlatTree::default(),
+    };
+    Ok(collect_status_impl(&index, &head_flat, &repo.root, &repo.ignore))
+}
+
+fn collect_status_impl(
     index: &Index,
     head: &SortedFlatTree,
     repo_root: &Path,

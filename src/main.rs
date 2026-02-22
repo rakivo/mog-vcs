@@ -167,6 +167,7 @@ fn main() -> Result<()> {
         Commands::Checkpoint => {
             let mut repo = Repository::open(".")?;
             mog::stash::stash(&mut repo)?;
+            repo.storage.remap()?;
             mog::stash::stash_apply(&mut repo, 0)?;
         }
 

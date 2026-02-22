@@ -9,8 +9,8 @@ use anyhow::Result;
 pub fn unstage(repo: &mut Repository, patterns: &[PathBuf]) -> Result<()> {
     let _span = tracy::span!("unstage::unstage");
 
-    let current_dir = std::env::current_dir()?;
-    let mut index   = Index::load(&repo.root)?;
+    let current_dir = &repo.root;
+    let mut index   = Index::load(current_dir)?;
 
     //
     //

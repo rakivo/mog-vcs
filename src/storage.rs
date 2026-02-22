@@ -15,7 +15,7 @@ pub trait MogStorage {
     fn write_batch<'a>(&mut self, writes: impl Iterator<Item = (Hash, &'a [u8])>) -> Result<()>;
     fn flush(&mut self) -> Result<()>;
     fn sync(&mut self) -> Result<()>;
-    fn evict_pages(&self, data: &[u8]);
+    fn evict_pages(data: &[u8]);
 }
 
 impl MogStorage for Storage {
@@ -25,7 +25,7 @@ impl MogStorage for Storage {
     fn write_batch<'a>(&mut self, writes: impl Iterator<Item = (Hash, &'a [u8])>) -> Result<()> { self.write_batch(writes) }
     fn flush(&mut self) -> Result<()> { self.flush() }
     fn sync(&mut self) -> Result<()> { self.sync() }
-    fn evict_pages(&self, _data: &[u8]) {}
+    fn evict_pages(_data: &[u8]) {}
 }
 
 const MAGIC: &[u8; 4] = b"MOGS";
@@ -254,13 +254,13 @@ impl Storage {
     }
 
     #[inline]
-    fn remap(&mut self) -> Result<()> {
+    pub fn remap(&mut self) -> Result<()> {
         self.mmap = unsafe { MmapOptions::new().map_mut(&self.file)? };
         Ok(())
     }
 
     #[inline]
-    pub fn evict_pages(&self, data: &[u8]) {
+    pub fn evict_pages(data: &[u8]) {
         #[cfg(unix)] {
             unsafe {
                 let ptr   = data.as_ptr() as usize;
@@ -286,7 +286,6 @@ impl Storage {
         let writes = core::mem::take(&mut self.pending_writes);
         self.flush_impl(writes.iter().map(|p| (p.hash, p.data.as_ref())))?;
         self.sync()?;
-        self.remap()?;
         Ok(())
     }
 

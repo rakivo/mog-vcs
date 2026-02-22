@@ -1,4 +1,4 @@
-use crate::{index::Index, repository::Repository};
+use crate::{index::Index, repository::Repository, stage::{classify_patterns, walk_matching}, status::SortedFlatTree};
 
 use std::path::{Path, PathBuf};
 
@@ -8,39 +8,69 @@ use rayon::prelude::*;
 
 pub fn discard(repo: &mut Repository, patterns: &[PathBuf]) -> Result<()> {
     let index = Index::load(&repo.root)?;
-
     if patterns.is_empty() {
         return discard_all(repo, &index);
     }
 
-    let current_dir = std::env::current_dir()?;
-    let (literal_roots, combined_re) = crate::stage::classify_patterns(patterns, &current_dir);
-    let matched = crate::stage::walk_matching(&repo.root, &repo.ignore, &literal_roots, combined_re.as_ref());
+    //
+    // Build HEAD flat tree so we know what exists in HEAD.
+    //
+    let head_flat = match repo.read_head_commit().ok() {
+        Some(head_hash) => {
+            let obj       = repo.read_object(&head_hash)?;
+            let commit_id = obj.try_as_commit_id()?;
+            let tree_hash = repo.commit.get_tree(commit_id);
+            crate::status::flatten_tree(repo, tree_hash)?
+        }
+        None => SortedFlatTree::default()
+    };
+
+    let current_dir = &repo.root;
+    let (literal_roots, combined_re) = classify_patterns(patterns, &current_dir);
+    let matched = walk_matching(current_dir, &repo.ignore, &literal_roots, combined_re.as_ref());
 
     let mut restored = 0usize;
     for (_abs, rel_str) in matched {
-        let Some(i) = index.find(&rel_str) else {
-            eprintln!("not in index, skipping: {rel_str}");
-            continue;
-        };
-
-        let hash = index.hashes[i];
         let abs = repo.root.join(rel_str.as_ref());
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        match head_flat.lookup(&rel_str) {
+            Some(head_hash) => {
+                //
+                // In HEAD: restore to HEAD version.
+                //
+                if let Some(parent) = abs.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                repo.with_blob_bytes_without_touching_cache_and_evict_the_pages(
+                    &head_hash,
+                    |_repo, data| std::fs::write(&abs, data)
+                )?;
+                restored += 1;
+            }
 
-        {
-            let raw = repo.storage.read(&hash)?;
-            let data = crate::object::decode_blob_bytes(raw)?;
-            std::fs::write(&abs, data)?;
-            repo.storage.evict_pages(raw);
+            None => match index.find(&rel_str) {
+                Some(i) if head_flat.is_empty() => {
+                    // No commits yet, index is the source of truth, restore from it.
+                    let hash = index.hashes[i];
+                    repo.with_blob_bytes_without_touching_cache_and_evict_the_pages(
+                        &hash,
+                        |_repo, data| std::fs::write(&abs, data)
+                    )?;
+                    restored += 1;
+                }
+                _ => {
+                    // In HEAD but not committed (or no index entry), delete it.
+                    _ = std::fs::remove_file(&abs);
+                    let mut index = Index::load(&repo.root)?;
+                    index.remove(&rel_str);
+                    index.save(&repo.root)?;
+                    restored += 1;
+                }
+            }
         }
-
-        restored += 1;
     }
 
     println!("Discarded changes in {restored} file(s)");
+
     Ok(())
 }
 
@@ -80,9 +110,11 @@ fn discard_all(repo: &mut Repository, index: &Index) -> Result<()> {
         let hash = index.hashes[i];
         let abs  = repo.root.join(index.get_path(i)).into_boxed_path();
         {
-            let raw = repo.storage.read(&hash)?;
-            let data = crate::object::decode_blob_bytes(raw)?.into();
-            repo.storage.evict_pages(raw);
+            let data = repo.with_blob_bytes_without_touching_cache_and_evict_the_pages(
+                &hash,
+                |_repo, data| anyhow::Ok(data.into())
+            )?;
+
             blobs.push((data, abs));
         }
     }

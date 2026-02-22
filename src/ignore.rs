@@ -90,12 +90,31 @@ impl Ignore {
     #[inline]
     #[must_use]
     pub fn empty() -> Self {
-        Self {
+        let mut empty = Self {
             root:     PathBuf::from("/mock"),
             exact:    Vec::new(),
             prefixes: Vec::new(),
             globs:    Vec::new(),
-        }
+        };
+
+        // @Cutnpaste from load
+
+        //
+        // Builtins: always ignore VCS metadata + our own store.
+        //
+        empty.prefixes.push(b".mog/".into());
+        empty.prefixes.push(b".git/".into());
+        empty.exact.push(b".mog".into());
+        empty.exact.push(b".git".into());
+
+        empty.exact.push(b".mogged".into()); // nocheckin
+
+        empty.exact.sort_unstable();
+        empty.exact.dedup();
+        empty.prefixes.sort_unstable();
+        empty.prefixes.dedup();
+
+        empty
     }
 
     #[inline]

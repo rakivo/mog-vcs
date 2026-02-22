@@ -140,6 +140,21 @@ impl<S: MogStorage> Repository<S> {
     }
 
     #[inline]
+    pub fn with_blob_bytes_without_touching_cache_and_evict_the_pages<T, E: Into<anyhow::Error>>(
+        &mut self,
+        hash: &Hash,
+        callback: impl FnOnce(&Self, &[u8]) -> std::result::Result<T, E>
+    ) -> Result<T> {
+        let raw = self.storage.read(hash)?;
+        let data = crate::object::decode_blob_bytes(raw)?;
+        let result = callback(self, data);
+
+        Storage::evict_pages(raw);
+
+        result.map_err(|e| e.into())
+    }
+
+    #[inline]
     pub fn read_blob_bytes_without_touching_stores(&mut self, hash: &Hash) -> Result<&[u8]> {
         if !self.object_cache.contains(hash) {
             let data = self.storage.read(hash)?;
@@ -197,12 +212,13 @@ impl<S: MogStorage> Repository<S> {
         let head = head.trim();
 
         if let Some(refpath) = head.strip_prefix("ref: ") {
-            // Normal: follow the ref
-            self.read_ref(refpath.trim())
-        } else {
-            // Detached: HEAD is the hash
-            hex_to_hash(head)
+            let hash_str = std::fs::read_to_string(
+                self.root.join(".mog").join(refpath)
+            )?.trim().to_string();
+            return hex_to_hash(&hash_str);
         }
+
+        hex_to_hash(head)
     }
 
     /// Return current branch name, or None if detached

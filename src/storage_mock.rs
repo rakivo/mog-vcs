@@ -57,5 +57,5 @@ impl MogStorage for MockStorage {
     fn sync(&mut self) -> Result<()> { Ok(()) }
 
     #[inline]
-    fn evict_pages(&self, _data: &[u8]) {}
+    fn evict_pages(_data: &[u8]) {}
 }
