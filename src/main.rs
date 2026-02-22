@@ -30,6 +30,8 @@ enum StashAction {
     Drop { index: Option<usize> },
 }
 
+// TODO(#5): Merge command
+
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize an empty mog repository.
