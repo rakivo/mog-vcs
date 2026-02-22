@@ -40,10 +40,10 @@ pub fn diff(repo: &mut Repository) -> Result<()> {
         //
 
         let Ok(before) = repo.read_blob_bytes_without_touching_cache(&entry.hash) else {
-            writeln!(out, "Binary files differ: {}", entry.path)?;
             continue;
         };
         let Ok(before) = std::str::from_utf8(&before) else {
+            writeln!(out, "Binary files differ: {}", entry.path)?;
             continue;
         };
 
