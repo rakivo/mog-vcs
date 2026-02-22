@@ -3,6 +3,7 @@ use crate::ignore::Ignore;
 use crate::index::Index;
 use crate::object::MODE_DIR;
 use crate::repository::Repository;
+use crate::storage::MogStorage;
 use crate::store::TreeId;
 use crate::tree::TreeEntryRef;
 use crate::util::{stdout_is_tty, str_from_utf8_data_shouldve_been_valid_or_we_got_hacked};
@@ -36,6 +37,77 @@ pub fn status(repo: &mut Repository) -> Result<()> {
     let buckets = collect_status(&index, &head_flat, &repo.root, &repo.ignore);
     print_status(&buckets, &mut std::io::stdout())?;
     Ok(())
+}
+
+pub struct FlatTreeBuilder {
+    path_blob:    Vec<u8>,
+    path_offsets: Vec<u32>,
+    hashes:       Vec<Hash>,
+}
+
+impl FlatTreeBuilder {
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            path_blob:    Vec::new(),
+            path_offsets: Vec::new(),
+            hashes:       Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub fn with_capacity(n: usize) -> Self {
+        Self {
+            path_blob:    Vec::with_capacity(n * 16),
+            path_offsets: Vec::with_capacity(n + 1),
+            hashes:       Vec::with_capacity(n),
+        }
+    }
+
+    #[inline]
+    pub fn push(&mut self, path: &str, hash: Hash) {
+        self.path_offsets.push(self.path_blob.len() as u32);
+        self.path_blob.extend_from_slice(path.as_bytes());
+        self.hashes.push(hash);
+    }
+
+    #[inline]
+    pub fn build(mut self) -> SortedFlatTree {
+        //
+        // Sentinel entry so get_path can always use path_offsets[i+1].
+        //
+        self.path_offsets.push(self.path_blob.len() as u32);
+
+        let path_blob    = self.path_blob.into_boxed_slice();
+        let path_offsets = self.path_offsets.into_boxed_slice();
+        let hashes       = self.hashes.into_boxed_slice();
+
+        let mut sorted_order = (0..hashes.len()).collect::<Vec<_>>();
+        sorted_order.sort_unstable_by(|&a, &b| {
+            let sa = {
+                let start = path_offsets[a] as usize;
+                let end   = path_offsets[a + 1] as usize;
+                &path_blob[start..end]
+            };
+            let sb = {
+                let start = path_offsets[b] as usize;
+                let end   = path_offsets[b + 1] as usize;
+                &path_blob[start..end]
+            };
+            sa.cmp(sb)
+        });
+
+        SortedFlatTree {
+            path_blob,
+            path_offsets,
+            hashes,
+            sorted_order: sorted_order.into_boxed_slice(),
+        }
+    }
+}
+
+impl Default for FlatTreeBuilder {
+    fn default() -> Self { Self::new() }
 }
 
 // Sorted tree for binary search
@@ -95,7 +167,7 @@ impl SortedFlatTree {
     }
 }
 
-pub fn flatten_tree(repo: &mut Repository, tree_hash: Hash) -> Result<SortedFlatTree> {
+pub fn flatten_tree(repo: &mut Repository<impl MogStorage>, tree_hash: Hash) -> Result<SortedFlatTree> {
     struct Frame {
         tree_id: TreeId,
         prefix: Box<str>

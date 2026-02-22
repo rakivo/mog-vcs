@@ -2,6 +2,7 @@ use crate::hash::Hash;
 use crate::object::{MODE_DIR, MODE_EXEC, MODE_FILE};
 use crate::repository::Repository;
 use crate::object::Object;
+use crate::storage::MogStorage;
 use crate::store::TreeId;
 use crate::tree::TreeEntry;
 use crate::tracy;
@@ -37,7 +38,7 @@ pub const MINIMAL_HEADER_SIZE_IN_BYTES: usize = 12; // magic, version and count
 pub const PATHS_BLOB_LEN_SIZE_IN_BYTES: usize = 4;
 pub const ENTRY_SIZE_IN_BYTES: usize = 56;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Index {
     pub count: usize,
 
@@ -121,6 +122,24 @@ impl Index {
         fs::write(path, self.encode())?;
 
         Ok(())
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.count = 0;
+        self.modes.clear();
+        self.hashes.clear();
+        self.mtimes.clear();
+        self.sizes.clear();
+        self.path_offsets.clear();
+        self.paths_blob.clear();
+        self.path_index.clear();
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn iter(&self) -> IndexIter<'_> {
+        IndexIter { mog_index: self, index: 0 }
     }
 
     #[inline]
@@ -298,20 +317,14 @@ impl Index {
         list.iter().copied().find(|&i| self.get_path(i) == path_str)
     }
 
-    pub fn add(&mut self, path: impl AsRef<str>, hash: Hash, meta: &fs::Metadata) {
+    pub fn add(&mut self, path: impl AsRef<str>, hash: Hash, meta: &impl AsMetadata) {
         let _span = tracy::span!("Index::add");
 
         let path_str = path.as_ref();
 
-        let mtime = meta
-            .modified()
-            .unwrap()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        let mode = if is_executable(meta) { MODE_EXEC } else { MODE_FILE };
-        let size = meta.len();
+        let mtime = meta.mtime_secs();
+        let mode = if meta.is_executable() { MODE_EXEC } else { MODE_FILE };
+        let size = meta.size_bytes();
 
         let h = Self::path_hash(path_str);
         if let Some(i) = self.path_index.get(&h).and_then(|list| {
@@ -437,29 +450,18 @@ impl Index {
     // Returns true if the file MIGHT be modified (triggers full hash check).
     #[inline]
     #[must_use]
-    pub fn is_dirty(&self, i: usize, metadata: &fs::Metadata) -> bool {
+    pub fn is_dirty(&self, i: usize, meta: &impl AsMetadata) -> bool {
         let _span = tracy::span!("Index::is_dirty");
 
-        let mtime = metadata
-            .modified()
-            .unwrap()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let mtime = meta.mtime_secs();
 
-        self.mtimes[i] != mtime || self.sizes[i] != metadata.len()
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn iter(&self) -> IndexIter<'_> {
-        IndexIter { mog_index: self, index: 0 }
+        self.mtimes[i] != mtime || self.sizes[i] != meta.size_bytes()
     }
 
     // Build and write tree objects from index entries.
     // Groups entries by directory, recursively builds subtrees bottom-up.
     #[inline]
-    pub fn write_tree(&self, repo: &mut Repository) -> Result<Hash> {
+    pub fn write_tree(&self, repo: &mut Repository<impl MogStorage>) -> Result<Hash> {
         //
         // Sort entries by path
         //
@@ -491,7 +493,7 @@ impl Index {
 // Builds a tree for `dir` by consuming a contiguous slice of sorted entries.
 // Returns (tree_hash, how_many_entries_consumed).
 fn build_tree(
-    repo: &mut Repository,
+    repo: &mut Repository<impl MogStorage>,
     paths:  &[&str],
     modes:  &[u32],
     hashes: &[Hash],
@@ -610,4 +612,41 @@ fn build_tree(
             }
         }
     }
+}
+
+/// Only for tests cuz `fs::Metadata` can't be constructed directly.
+pub struct FakeMeta { pub mtime: i64, pub size: u64 }
+
+impl Index {
+    #[inline]
+    pub fn encode_for_test(&self) -> Vec<u8> { self.encode() }
+    #[inline]
+    pub fn decode_for_test(data: &[u8]) -> Result<Self> { Self::decode(data) }
+}
+
+pub trait AsMetadata {
+    fn mtime_secs(&self) -> i64;
+    fn size_bytes(&self) -> u64;
+    fn is_executable(&self) -> bool;
+}
+
+impl AsMetadata for fs::Metadata {
+    #[inline]
+    fn mtime_secs(&self) -> i64 {
+        self.modified().ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as i64)
+    }
+
+    #[inline]
+    fn size_bytes(&self) -> u64 { self.len() }
+
+    #[inline]
+    fn is_executable(&self) -> bool { is_executable(self) }
+}
+
+impl AsMetadata for FakeMeta {
+    fn mtime_secs(&self) -> i64 { self.mtime }
+    fn size_bytes(&self) -> u64 { self.size }
+    fn is_executable(&self) -> bool { false }
 }
