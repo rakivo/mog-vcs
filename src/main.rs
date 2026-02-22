@@ -1,4 +1,4 @@
-use mog::repository::Repository;
+use mog::{diff::DiffTarget, repository::Repository};
 
 use std::path::PathBuf;
 
@@ -66,13 +66,14 @@ enum Commands {
         #[command(subcommand)]
         action: StashAction,
     },
-    // TODO: Diff between working directory and a branch.
-    // TODO: Diff between working directory and a commit.
-    /// Print the diff between working directory and index.
+    /// Print the diff between working directory and staged/branch/commit.
     Diff {
         /// Compare HEAD vs index.
         #[arg(short = 'b', long)]
         staged: bool,
+
+        /// Compare working directory vs branch/commit.
+        target: Option<String>
     },
     /// Log all commits.
     Log,
@@ -197,12 +198,21 @@ fn main() -> Result<()> {
             mog::discard::discard(&mut repo, &files)?;
         }
 
-        Commands::Diff { staged } => {
+        Commands::Diff { staged, target } => {
             let mut repo = Repository::open(".")?;
             if staged {
-                mog::diff::diff_staged(&mut repo)?;
+                mog::diff::diff(&mut repo, DiffTarget::Staged)?;
+            } else if let Some(target) = target {
+                let branch_ref = format!("refs/heads/{target}");
+                let branch_path = repo.root.join(".mog").join(&branch_ref);
+
+                if branch_path.exists() {
+                    mog::diff::diff(&mut repo, DiffTarget::Branch(&target))?;
+                } else {
+                    mog::diff::diff(&mut repo, DiffTarget::Commit(&target))?;
+                }
             } else {
-                mog::diff::diff(&mut repo)?;
+                mog::diff::diff(&mut repo, DiffTarget::WorkingVsIndex)?;
             }
         }
 
