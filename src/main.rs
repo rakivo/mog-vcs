@@ -51,6 +51,8 @@ enum Commands {
         #[arg(short = 'm')]
         message: String,
 
+        // TODO(#4): Commit `--ammend` flag
+
         #[arg(long, default_value = "Your Name")]
         author: String,
     },
